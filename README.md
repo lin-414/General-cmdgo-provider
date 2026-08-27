@@ -101,6 +101,8 @@ Copy `dist\cmdgo-provider.exe` and `dist\cmdgo-login.exe` into the same folder a
 
 ## 简体中文
 
+> 建议将本仓库作为 [`Ajwyunsx/dsh-cmdgo-provider`](https://github.com/Ajwyunsx/dsh-cmdgo-provider) 的 Fork 发布，而不是伪装成官方项目。本仓库是 Python 独立实现，保留了上游 MIT 许可证和来源说明。
+
 `cmdgo-provider` 是一个纯 Python、零运行时依赖的本地 OpenAI 兼容适配器，用于把 Command Code Go 接入 Hermes Studio 等支持 OpenAI 兼容接口的客户端。
 
 它把以下接口转换为 Command Code CLI 使用的私有网关：
@@ -171,6 +173,10 @@ python tests/test_mock.py
 python tests/test_cached_auth.py
 ```
 
-## Attribution
+## Relationship to the upstream project
 
-The protocol and model-filtering implementation is adapted from the MIT-licensed `dsh-cmdgo-provider` project. See `LICENSE`.
+This repository is intended to be published as a fork of [`Ajwyunsx/dsh-cmdgo-provider`](https://github.com/Ajwyunsx/dsh-cmdgo-provider), not as an official Command Code repository.
+
+The upstream project is the reference for the Command Code Go protocol, OAuth flow, request fingerprint, and model filtering. This fork adds a standalone Python implementation, an OpenAI Chat Completions adapter, Hermes Studio/Codex/other-client configuration, Windows helper scripts, and portable EXE build instructions.
+
+The upstream project is MIT-licensed. The protocol and model-filtering implementation is adapted from it; the upstream copyright and license notice are preserved in `LICENSE`.
