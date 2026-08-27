@@ -1,9 +1,9 @@
 @echo off
 setlocal
 set "ROOT=%~dp0..\"
-if exist "%ROOT%cmdgo-login.exe" (
-  "%ROOT%cmdgo-login.exe" --base http://127.0.0.1:8787
-  exit /b %errorlevel%
+if exist "%ROOT%cmdgo-provider.exe" (
+  start "" "%ROOT%cmdgo-provider.exe" --login --keep-alive
+  exit /b
 )
 set "PYTHON=python.exe"
-"%PYTHON%" "%ROOT%login.py" --base http://127.0.0.1:8787
+start "" "%PYTHON%" "%ROOT%cmdgo_provider.py" --login --keep-alive

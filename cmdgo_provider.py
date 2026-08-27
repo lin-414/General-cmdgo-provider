@@ -199,6 +199,7 @@ def error_type(status: int) -> str:
 def openai_to_cc_envelope(body: dict) -> dict:
     system = ""
     messages = []
+    tool_name_map = {}  # tool_call_id -> toolName, populated from assistant messages
     for m in body.get("messages", []) or []:
         role = m.get("role")
         if role == "system":
@@ -230,6 +231,8 @@ def openai_to_cc_envelope(body: dict) -> dict:
                     "toolName": fn.get("name"),
                     "input": args,
                 })
+                if tc.get("id"):
+                    tool_name_map[tc["id"]] = fn.get("name")
             messages.append({"role": "assistant", "content": content})
         elif role == "tool":
             messages.append({
@@ -237,7 +240,7 @@ def openai_to_cc_envelope(body: dict) -> dict:
                 "content": [{
                     "type": "tool-result",
                     "toolCallId": m.get("tool_call_id"),
-                    "toolName": "unknown",
+                    "toolName": tool_name_map.get(m.get("tool_call_id"), "unknown"),
                     "output": {
                         "type": "text",
                         "value": m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content")),
@@ -255,7 +258,7 @@ def openai_to_cc_envelope(body: dict) -> dict:
                         tool_results.append({
                             "type": "tool-result",
                             "toolCallId": b.get("tool_call_id"),
-                            "toolName": "unknown",
+                            "toolName": tool_name_map.get(b.get("tool_call_id"), "unknown"),
                             "output": {
                                 "type": "text",
                                 "value": b.get("content") if isinstance(b.get("content"), str) else json.dumps(b.get("content")),
@@ -353,7 +356,7 @@ def event_to_openai(event: dict, state: dict):
         state["toolIdx"] += 1
     elif t == "finish-step":
         usage = event.get("usage")
-        if isinstance(usage, dict) and (state.get("wantUsage") or True):
+        if isinstance(usage, dict) and state.get("wantUsage"):
             out.append({
                 "choices": [],
                 "usage": {
@@ -491,7 +494,7 @@ class LoginManager:
             self.server = ThreadingHTTPServer(("127.0.0.1", self.port), self._make_handler())
             self.expected_state = secrets.token_urlsafe(32)
             self.started_at = int(time.time() * 1000)
-            self.callback_url = f"http://localhost:{self.port}/callback"
+            self.callback_url = f"http://127.0.0.1:{self.port}/callback"
             self.auth_url = (
                 f"{STUDIO_BASE}/studio/auth/cli"
                 f"?callback={urllib.parse.quote(self.callback_url, safe='')}"
@@ -736,10 +739,10 @@ def handle_chat(handler, body: dict) -> None:
             for ev in iter_ndjson_lines(upstream):
                 for p in event_to_openai(ev, state):
                     sse(handler, p)
-                if ev.get("type") == "finish-step":
-                    break
+                # finish-step events are forwarded by event_to_openai;
+                # do NOT break here — multi-step tool use sends multiple steps
         except Exception as e:
-            sse(handler, {"error": {"message": f"stream error: {e}"}})
+            sse(handler, {"error": {"message": f"stream error: {e}", "type": "api_error"}})
         sse(handler, "[DONE]")
         handler.wfile.flush()
     finally:
@@ -779,6 +782,210 @@ def _safe_read(resp) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Web 控制面板
+# ---------------------------------------------------------------------------
+_WEB_UI_HTML = r"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cmdgo-provider</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--dim:#8b949e;
+--green:#3fb950;--red:#f85149;--blue:#58a6ff;--yellow:#d29922}
+body{background:var(--bg);color:var(--text);font:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;min-height:100vh}
+a{color:var(--blue);text-decoration:none}
+.container{max-width:800px;margin:0 auto;padding:24px 16px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:24px}
+header h1{font-size:20px;font-weight:600}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500}
+.badge.ok{background:rgba(63,185,80,.15);color:var(--green)}
+.badge.err{background:rgba(248,81,73,.15);color:var(--red)}
+.badge.warn{background:rgba(210,153,34,.15);color:var(--yellow)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot.off{background:var(--red)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.card h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.card .val{font-size:28px;font-weight:700}
+.card .sub{font-size:13px;color:var(--dim);margin-top:4px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+.btn{border:1px solid var(--border);background:var(--card);color:var(--text);padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--blue);color:var(--blue)}
+.btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn.primary:hover{opacity:.85}
+.btn.danger{border-color:var(--red);color:var(--red)}
+.btn.danger:hover{background:var(--red);color:#fff}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.models{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-height:320px;overflow-y:auto}
+.models h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.model-list{display:flex;flex-wrap:wrap;gap:6px}
+.tag{background:rgba(88,166,255,.1);color:var(--blue);padding:3px 10px;border-radius:6px;font-size:12px;font-family:monospace}
+.log-section{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-top:20px}
+.log-section h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+#log{font-family:"Cascadia Code","Fira Code",Consolas,monospace;font-size:12px;line-height:1.6;max-height:240px;overflow-y:auto;color:var(--dim);white-space:pre-wrap;word-break:break-all}
+footer{text-align:center;color:var(--dim);font-size:12px;margin-top:32px;padding:16px}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>cmdgo-provider</h1>
+    <span id="badge" class="badge err"><span class="dot off"></span>已停止</span>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>代理状态</h2>
+      <div class="val" id="s-port">—</div>
+      <div class="sub" id="s-base">COMMANDCODE_BASE_URL</div>
+    </div>
+    <div class="card">
+      <h2>可用模型</h2>
+      <div class="val" id="s-models">—</div>
+      <div class="sub">Go 套餐模型</div>
+    </div>
+    <div class="card">
+      <h2>登录状态</h2>
+      <div class="val" id="s-auth">未登录</div>
+      <div class="sub" id="s-user">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn primary" id="btn-login" onclick="doLogin()">OAuth 登录</button>
+    <button class="btn danger" id="btn-logout" onclick="doLogout()" style="display:none">退出登录</button>
+  </div>
+
+  <div class="models">
+    <h2>模型列表</h2>
+    <div class="model-list" id="model-list">加载中…</div>
+  </div>
+
+  <div class="log-section">
+    <h2>实时日志</h2>
+    <div id="log"></div>
+  </div>
+
+  <footer>cmdgo-provider · 非官方 Command Code Go 适配器</footer>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let logLines = [];
+const MAX_LOG = 200;
+
+function addLog(msg) {
+  const t = new Date().toLocaleTimeString();
+  logLines.push('[' + t + '] ' + msg);
+  if (logLines.length > MAX_LOG) logLines.shift();
+  $('#log').textContent = logLines.join('\n');
+  $('#log').scrollTop = $('#log').scrollHeight;
+}
+
+async function poll() {
+  try {
+    const [h, s, m] = await Promise.all([
+      fetch('/healthz').then(r => r.json()),
+      fetch('/login/status').then(r => r.json()),
+      fetch('/v1/models').then(r => r.json()),
+    ]);
+
+    // 状态
+    if (h.ok) {
+      $('#badge').className = 'badge ok';
+      $('#badge').innerHTML = '<span class="dot on"></span>运行中';
+      $('#s-port').textContent = '端口 ' + (location.port || '80');
+      $('#s-models').textContent = h.models || 0;
+      $('#s-base').textContent = h.baseUrl || '';
+    }
+
+    // 登录
+    const hasKey = s.hasKey;
+    if (hasKey) {
+      $('#s-auth').textContent = '已登录';
+      $('#s-auth').style.color = 'var(--green)';
+      const who = s.userName || s.keyName || 'Go 套餐';
+      $('#s-user').textContent = who;
+      $('#btn-login').style.display = 'none';
+      $('#btn-logout').style.display = '';
+    } else {
+      $('#s-auth').textContent = '未登录';
+      $('#s-auth').style.color = 'var(--red)';
+      $('#s-user').innerHTML = '&nbsp;';
+      $('#btn-login').style.display = '';
+      $('#btn-logout').style.display = 'none';
+    }
+
+    // 模型
+    const models = m.data || [];
+    const list = $('#model-list');
+    if (models.length) {
+      list.innerHTML = models.map(x => '<span class="tag">' + x.id + '</span>').join('');
+    } else {
+      list.textContent = '暂无模型';
+    }
+  } catch (e) {
+    $('#badge').className = 'badge err';
+    $('#badge').innerHTML = '<span class="dot off"></span>连接失败';
+  }
+}
+
+async function doLogin() {
+  $('#btn-login').disabled = true;
+  $('#btn-login').textContent = '登录中…';
+  addLog('正在发起 OAuth 登录…');
+  try {
+    const r = await fetch('/login', {method: 'POST', headers: {'Content-Type': 'application/json'}});
+    const j = await r.json();
+    if (j.ok && j.authUrl) {
+      addLog('请在浏览器中完成授权');
+      window.open(j.authUrl, '_blank');
+      // 轮询等待
+      let ok = false;
+      for (let i = 0; i < 400; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const st = await fetch('/login/status').then(r => r.json());
+        if (st.status === 'success' && st.hasKey) {
+          addLog('登录成功！');
+          ok = true;
+          break;
+        }
+        if (st.status === 'error') {
+          addLog('授权失败: ' + (st.message || '未知错误'));
+          break;
+        }
+      }
+      if (!ok && !$('#s-auth').textContent.includes('成功')) addLog('登录超时');
+    } else {
+      addLog('登录启动失败: ' + JSON.stringify(j));
+    }
+  } catch (e) {
+    addLog('登录请求出错: ' + e);
+  }
+  $('#btn-login').disabled = false;
+  $('#btn-login').textContent = 'OAuth 登录';
+  poll();
+}
+
+async function doLogout() {
+  try {
+    await fetch('/logout', {method: 'POST'});
+    addLog('已退出登录');
+  } catch (e) {}
+  poll();
+}
+
+poll();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
 # 主代理 HTTP 处理
 # ---------------------------------------------------------------------------
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -805,11 +1012,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if p == "/login/status":
             send_json(self, 200, login.status())
             return
-        if p in ("", "/healthz"):
+        if p == "/healthz":
             send_json(self, 200, {"ok": True, "service": "cmdgo-hermes-provider",
                                   "models": len(model_cache["models"]), "baseUrl": BASE_URL})
             return
-        send_json(self, 404, {"error": {"not found": True, "hint": "try /v1/chat/completions, /v1/models, /login, /healthz"}})
+        if p in ("", "/"):
+            body = _WEB_UI_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        send_json(self, 404, {"error": {"message": "Not found. Try /v1/chat/completions, /v1/models, /login, /healthz", "type": "invalid_request_error"}})
 
     def do_POST(self):
         p = self.path.split("?")[0].rstrip("/")
@@ -844,7 +1060,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             send_json(self, 500, {"error": {"message": str(e), "type": "api_error"}})
             return
-        send_json(self, 404, {"error": {"not found": True}})
+        send_json(self, 404, {"error": {"message": "Not found", "type": "invalid_request_error"}})
 
 
 class _Server(ThreadingHTTPServer):
@@ -880,6 +1096,109 @@ def start_server(block: bool = False):
     return _server
 
 
+def _run_login_flow(port: int) -> int:
+    """OAuth 登录流程：启动代理 → 打开浏览器 → 轮询等待授权完成。"""
+    import webbrowser
+
+    base = f"http://127.0.0.1:{port}"
+
+    # 启动代理（后台）
+    start_server(block=False)
+    # 等待代理就绪
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/healthz", timeout=1) as r:
+                if r.status == 200:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
+    else:
+        print("错误：代理服务器启动超时")
+        return 1
+
+    # 发起登录
+    req = urllib.request.Request(base + "/login", data=b"",
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            j = json.loads(r.read())
+    except Exception as e:
+        print("无法发起登录：" + str(e))
+        return 1
+    if not j.get("ok"):
+        print("登录启动失败：" + str(j))
+        return 1
+
+    auth_url = j["authUrl"]
+    print("请在浏览器中完成 Command Code 授权：")
+    print(auth_url)
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+
+    # 轮询状态
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/login/status", timeout=10) as r:
+                st = json.loads(r.read())
+        except Exception as e:
+            print("查询登录状态出错：" + str(e))
+            return 1
+        if st.get("status") == "success" and st.get("hasKey"):
+            print("登录成功！Go key 已缓存，现在可以直接用了。")
+            return 0
+        if st.get("status") == "error":
+            print("授权失败：" + st.get("message", "未知错误"))
+            return 1
+        time.sleep(1.5)
+    print("登录超时（10 分钟）。可重新运行重试。")
+    return 1
+
+
+def _run_gui():
+    """启动代理服务器 + 原生 GUI 窗口（Edge WebView2）。"""
+    try:
+        import webview
+    except ImportError:
+        log("pywebview 未安装，回退到控制台模式。安装: pip install pywebview")
+        start_server(block=True)
+        return
+
+    # 启动 HTTP 服务（后台线程）
+    start_server(block=False)
+    # 等待服务就绪
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/healthz", timeout=1) as r:
+                if r.status == 200:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.3)
+    else:
+        log("错误：代理服务器启动超时，回退到控制台模式")
+        start_server(block=True)
+        return
+
+    log("GUI 窗口已打开 (http://127.0.0.1:%s)", PORT)
+    window = webview.create_window(
+        f"cmdgo-provider  ·  localhost:{PORT}",
+        url=f"http://127.0.0.1:{PORT}/",
+        width=960,
+        height=720,
+        min_size=(640, 480),
+        text_select=True,
+    )
+    # webview.start() 会阻塞直到窗口关闭；关闭后退出进程
+    webview.start(debug=False)
+    log("GUI 窗口已关闭，退出")
+
+
 def main():
     global PORT, BASE_URL, OVERRIDE_KEY, CC_VERSION
     ap = argparse.ArgumentParser(description="CommandCode Go -> OpenAI 兼容代理 (纯 Python)")
@@ -887,13 +1206,35 @@ def main():
     ap.add_argument("--base-url", default=BASE_URL)
     ap.add_argument("--api-key", default=OVERRIDE_KEY)
     ap.add_argument("--cc-version", default=CC_VERSION)
+    ap.add_argument("--login", action="store_true", help="启动代理并完成 OAuth 登录后退出")
+    ap.add_argument("--keep-alive", action="store_true", help="与 --login 搭配：登录成功后保持代理运行")
+    ap.add_argument("--no-gui", action="store_true", help="仅控制台模式，不打开 GUI 窗口")
     args = ap.parse_args()
     PORT = args.port
     BASE_URL = args.base_url.rstrip("/")
     if args.api_key:
         OVERRIDE_KEY = args.api_key
     CC_VERSION = args.cc_version
-    start_server(block=True)
+
+    if args.login:
+        rc = _run_login_flow(args.port)
+        if rc != 0:
+            sys.exit(rc)
+        if not args.keep_alive:
+            return
+        # --keep-alive: 登录成功后继续运行代理
+        log("登录完成，代理继续运行在 http://127.0.0.1:%s", PORT)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            log("收到中断信号，退出")
+            return
+
+    if args.no_gui:
+        start_server(block=True)
+    else:
+        _run_gui()
 
 
 if __name__ == "__main__":

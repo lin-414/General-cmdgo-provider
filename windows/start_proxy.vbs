@@ -1,13 +1,13 @@
 Option Explicit
 
-Dim fso, shell, scriptDir, baseDir, pythonExe, runFile, exeFile, logDir, logFile, command
+Dim fso, shell, scriptDir, baseDir, exeFile, pyFile, logDir, logFile, command
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
 
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 baseDir = fso.GetParentFolderName(scriptDir)
 exeFile = baseDir & "\cmdgo-provider.exe"
-runFile = baseDir & "\run.py"
+pyFile = baseDir & "\cmdgo_provider.py"
 logDir = baseDir & "\logs"
 logFile = logDir & "\proxy.log"
 
@@ -15,10 +15,10 @@ If Not fso.FolderExists(logDir) Then fso.CreateFolder(logDir)
 shell.CurrentDirectory = baseDir
 
 If fso.FileExists(exeFile) Then
-  command = "cmd.exe /d /c """ & exeFile & "" >> """ & logFile & "" 2>&1"
+  command = """" & exeFile & """ --no-gui"
+  shell.Run command, 0, False
 Else
   pythonExe = "python.exe"
-  command = "cmd.exe /d /c """ & pythonExe & """ """ & runFile & """ >> """ & logFile & "" 2>&1"
+  command = "cmd.exe /d /c """"" & pythonExe & """ """ & pyFile & """ --no-gui >> """ & logFile & """ 2>&1"""""
+  shell.Run command, 0, False
 End If
-
-shell.Run command, 0, False
