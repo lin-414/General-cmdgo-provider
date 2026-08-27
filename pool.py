@@ -79,6 +79,21 @@ class PoolAccount:
             d["lastUsedAt"] = self.lastUsedAt
         return d
 
+    @property
+    def display_name(self) -> str:
+        """给账号一个可读的显示名：优先用户名，其次密钥名，其次 id。
+
+        收编进来的旧账号通常没有 userName/keyName，此时回退到 id；但对于
+        ``default`` 这类由 adopt_legacy 产生的账号，给出更友好的标签。
+        """
+        if self.userName:
+            return self.userName
+        if self.keyName:
+            return self.keyName
+        if self.id == "default":
+            return "默认账号（旧 key）"
+        return self.id
+
     @classmethod
     def from_dict(cls, d: dict) -> "PoolAccount":
         return cls(
@@ -297,6 +312,7 @@ class AccountPool:
                 "id": a.id,
                 "userName": a.userName,
                 "keyName": a.keyName,
+                "displayName": a.display_name,
                 "addedAt": a.addedAt,
                 "enabled": a.enabled,
                 "failCount": a.failCount,

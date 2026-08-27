@@ -83,6 +83,16 @@ class AccountPoolTest(unittest.TestCase):
         rows = self.p.describe_all()
         self.assertEqual(len(rows), 1)
         self.assertNotIn("apiKey", rows[0])
+        self.assertIn("displayName", rows[0])
+
+    def test_display_name_prefers_username(self):
+        a = self._add("k1", "alice", "work-key")
+        self.assertEqual(a.display_name, "alice")
+
+    def test_display_name_falls_back_for_default(self):
+        # 模拟 adopt_legacy 产生的 default 账号
+        acc = pool.PoolAccount(id="default", apiKey="legacy")
+        self.assertEqual(acc.display_name, "默认账号（旧 key）")
 
     def test_pick_returns_none_when_empty(self):
         self.assertIsNone(self.p.pick())

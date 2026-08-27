@@ -244,7 +244,7 @@ class App(ctk.CTk):
             # 状态点 + 名称
             status = "●" if acc.get("enabled") and not acc.get("cooling") else ("◐" if acc.get("cooling") else "○")
             color = "#4CAF50" if acc.get("enabled") and not acc.get("cooling") else ("#d29922" if acc.get("cooling") else "#f44336")
-            name = acc.get("userName") or acc.get("keyName") or acc.get("id")
+            name = acc.get("displayName") or acc.get("userName") or acc.get("keyName") or acc.get("id")
             lbl = ctk.CTkLabel(row, text=f"{status} {name}",
                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color=color)
             lbl.pack(side="left", padx=(10, 4), pady=6)
