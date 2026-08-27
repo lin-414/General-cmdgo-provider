@@ -173,10 +173,15 @@ print(response.choices[0].message.content)
 
 Multiple OAuth logins are harvested into an **account pool** stored at `%APPDATA%\cmdgo-provider\accounts.json`. Each login adds one account; requests rotate across enabled accounts (round-robin) to spread plan quota. A failed request puts that account on an exponential cool-down and the adapter fails over to the next account.
 
+The GUI shows the pool in an **账号池** panel: each account is displayed by its username (or key name, or a friendly fallback for adopted legacy accounts) with a state dot, plus **启用/停用** and **删除** buttons. Network calls for these actions run on worker threads so the UI never freezes.
+
 ```text
 账号池目录: %APPDATA%\cmdgo-provider\accounts.json
 调度方式:     轮询 + 指数退避（30s → 15min 上限）+ 失败转接
+账户结构:     id / userName / keyName / enabled / failCount / cooldown / displayName
 ```
+
+> Deleting an account that is already gone returns `404` (treated as a no-op, not an error). Pool-empty requests fall back to the token in `token.json`.
 
 ### Windows scripts
 
@@ -329,10 +334,15 @@ API Key: cmdgo
 
 多次 OAuth 登录会被收集到**账号池**，存于 `%APPDATA%\cmdgo-provider\accounts.json`。每登录一次添加一个账号；请求在启用的账号之间轮询（round-robin）以摊薄套餐额度。某个账号请求失败会进入指数退避冷却，并自动转接到下一个账号。
 
+GUI 的「账号池」面板会列出池内账号：按用户名（或密钥名，或收编旧账号的友好兜底名）显示，带状态点，并提供**启用/停用**和**删除**按钮。这些操作在网络线程执行，界面不会卡顿。
+
 ```text
 账号池目录: %APPDATA%\cmdgo-provider\accounts.json
 调度方式:   轮询 + 指数退避（30s → 15min 上限）+ 失败转接
+账户结构:   id / userName / keyName / enabled / failCount / cooldown / displayName
 ```
+
+> 删除一个已不存在的账号会返回 `404`（视为无操作，不报错）。账号池为空时，请求回退到 `token.json` 里的 token。
 
 ### Windows 脚本
 
