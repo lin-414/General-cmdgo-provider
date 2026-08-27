@@ -55,6 +55,24 @@ This is an independent Python implementation focused on local OpenAI-compatible 
 
 Source mode requires Python 3.10 or newer. Runtime dependencies are standard-library only; GUI mode requires `pywebview` (optional). Pre-built Windows EXEs do not require Python.
 
+### Download (pre-built EXE)
+
+[![Release](https://img.shields.io/github/v/release/lin-414/General-cmdgo-provider?label=Release)](https://github.com/lin-414/General-cmdgo-provider/releases/latest)
+
+Pre-built Windows binaries are published on the [Releases](https://github.com/lin-414/General-cmdgo-provider/releases) page — no Python required.
+
+- **`cmdgo-gui.exe`** — modern dark-theme desktop GUI with system-tray resident mode. Double-click to launch; it auto-starts the local proxy on `http://127.0.0.1:8787`. Closing the window minimizes to the tray instead of exiting.
+
+Point any OpenAI-compatible client at the local adapter:
+
+```text
+Base URL: http://127.0.0.1:8787/v1
+API mode: chat_completions
+API key:  cmdgo
+```
+
+> `cmdgo` is only a client-side placeholder. The adapter uses the OAuth token saved by `login.py`.
+
 ### Run from source
 
 ```bash
@@ -216,6 +234,24 @@ Command Code Go 主要面向 Command Code CLI，并且不提供静态 Provider A
 - 请使用自己的账号，遵守套餐额度和服务条款；如果服务拒绝会话，应立即停止使用。
 - 默认只监听 `127.0.0.1`，不要把 8787 端口暴露到公网。
 - 不要分享 `%APPDATA%\\cmdgo-provider\\token.json` 或 Authorization 请求头。
+
+### 下载预编译程序
+
+[![Release](https://img.shields.io/github/v/release/lin-414/General-cmdgo-provider?label=Release)](https://github.com/lin-414/General-cmdgo-provider/releases/latest)
+
+预编译的 Windows 程序发布在 [Releases](https://github.com/lin-414/General-cmdgo-provider/releases) 页面，**无需安装 Python**。
+
+- **`cmdgo-gui.exe`** —— 现代深色主题桌面界面 + 系统托盘常驻。双击启动即自动运行本地代理（`http://127.0.0.1:8787`）；关闭窗口时会最小化到托盘而不是退出。
+
+把任意 OpenAI 兼容客户端指向本地适配器：
+
+```text
+Base URL: http://127.0.0.1:8787/v1
+协议模式: chat_completions
+API Key: cmdgo
+```
+
+> `cmdgo` 只是客户端占位符，不是 Command Code API Key。实际请求使用 OAuth 缓存 token。
 
 ### 从源码运行
 
