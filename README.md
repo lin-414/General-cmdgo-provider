@@ -157,6 +157,7 @@ Scripts are in `windows/`:
 - `install_autostart.cmd` — install per-user Windows logon startup.
 - `uninstall_autostart.cmd` — remove the startup entry.
 - `build_windows.cmd` — build the EXEs with PyInstaller.
+- `build_gui.cmd` — build the modern GUI + tray EXE (`dist\cmdgo-gui.exe`) with a bundled app icon.
 
 A portable EXE folder should contain the EXEs next to the helper scripts. The token is stored outside the repository at `%APPDATA%\\cmdgo-provider\\token.json`.
 
@@ -282,7 +283,8 @@ API Key: cmdgo
 - `stop_proxy.cmd`：停止代理；
 - `install_autostart.cmd`：设置当前用户登录时自动启动；
 - `uninstall_autostart.cmd`：取消开机自启；
-- `build_windows.cmd`：使用 PyInstaller 构建 EXE。
+- `build_windows.cmd`：使用 PyInstaller 构建 EXE；
+- `build_gui.cmd`：构建带应用图标的现代 GUI + 托盘 EXE（`dist\cmdgo-gui.exe`）。
 
 Token 保存位置：
 

@@ -62,6 +62,20 @@ from PIL import Image, ImageDraw
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+
+def _system_font_family(root=None) -> str:
+    """读取当前系统的默认 UI 字体（如 Windows 的 Microsoft YaHei UI / Segoe UI）。
+
+    customtkinter 默认用自带的 Roboto，用户要求用系统默认，故动态读取 Tk 的
+    TkDefaultFont 字体族名，任何系统上都能匹配。
+    """
+    try:
+        import tkinter.font as tkfont
+        root = root or tkinter._get_default_root()
+        return tkfont.nametofont("TkDefaultFont").actual("family")
+    except Exception:
+        return "Segoe UI"
+
 # 托盘图标（简单圆形）
 def _make_tray_icon(color: str = "#4CAF50", size: int = 64) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -78,6 +92,13 @@ class App(ctk.CTk):
     def __init__(self, port: int):
         super().__init__()
 
+        # 让全局主题字体跟随系统默认（按钮/标签等未显式指定 font 的控件都会继承）
+        try:
+            _sys = _system_font_family(self)
+            ctk.ThemeManager.theme["CTkFont"]["family"] = _sys
+        except Exception:
+            pass
+
         self.port = port
         self._server = None
         self._running = False
@@ -90,16 +111,29 @@ class App(ctk.CTk):
         self.minsize(420, 320)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # 设置窗口图标（用托盘图标）
+        # 设置窗口图标（优先使用打包的 .ico，回退到程序生成的圆形图标）
         self._icon_img = _make_tray_icon()
-        # tkinter 需要 PhotoImage
-        self._tk_icon = ctk.CTkImage(self._icon_img, size=(32, 32))
+        self._tk_icon = self._load_window_icon()
 
         self._build_ui()
         self._start_log_poll()
 
         # 自动启动代理
         self.after(300, self._toggle_proxy)
+
+    def _load_window_icon(self):
+        """尝试加载打包的 assets/icon.ico 作为窗口图标，失败则回退到内置圆形图标。"""
+        try:
+            import tkinter as _tk
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            ico = os.path.join(base, "assets", "icon.ico")
+            if os.path.isfile(ico):
+                img = _tk.PhotoImage(master=self, file=ico)
+                self.iconphoto(True, img)
+                return img
+        except Exception:
+            pass
+        return ctk.CTkImage(self._icon_img, size=(32, 32))
 
     # ---- UI 构建 ----
     def _build_ui(self):
@@ -110,14 +144,14 @@ class App(ctk.CTk):
 
         self._lbl_status = ctk.CTkLabel(
             self._frame_status, text="● 已停止",
-            font=ctk.CTkFont(size=18, weight="bold"),
+            font=ctk.CTkFont(family=_system_font_family(), size=18, weight="bold"),
             text_color="#f44336",
         )
         self._lbl_status.pack(side="left", padx=16, pady=12)
 
         self._lbl_info = ctk.CTkLabel(
             self._frame_status, text=f"端口 {self.port}  |  模型 —",
-            font=ctk.CTkFont(size=13),
+            font=ctk.CTkFont(family=_system_font_family(), size=13),
             text_color="#aaa",
         )
         self._lbl_info.pack(side="right", padx=16, pady=12)
@@ -149,7 +183,7 @@ class App(ctk.CTk):
 
         # 日志区域
         self._txt_log = ctk.CTkTextbox(
-            self, font=ctk.CTkFont(family="Consolas", size=12),
+            self, font=ctk.CTkFont(family=_system_font_family(), size=12),
             state="disabled", wrap="word",
         )
         self._txt_log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
