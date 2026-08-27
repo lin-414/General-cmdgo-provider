@@ -106,6 +106,7 @@ class App(ctk.CTk):
         self._tray_thread = None
         self._accounts = []          # 账号池快照（来自 /account/list）
         self._acct_row_widgets = []  # 账号列表行控件引用
+        self._acct_refreshing = False  # 防止并发账号刷新
 
         # 窗口设置
         self.title("cmdgo-provider")
@@ -213,7 +214,13 @@ class App(ctk.CTk):
 
     # ---- 账号池 ----
     def _refresh_accounts(self):
-        """从 /account/list 拉取账号池并在界面渲染。"""
+        """拉取账号池并渲染；在后台线程执行，避免阻塞主线程。"""
+        if self._acct_refreshing:
+            return
+        self._acct_refreshing = True
+        threading.Thread(target=self._refresh_accounts_thread, daemon=True).start()
+
+    def _refresh_accounts_thread(self):
         try:
             base = f"http://127.0.0.1:{self.port}"
             with urllib.request.urlopen(base + "/account/list", timeout=4) as r:
@@ -222,7 +229,9 @@ class App(ctk.CTk):
         except Exception:
             # 服务器未就绪时保持空列表
             self._accounts = []
-        self._render_accounts()
+        finally:
+            self._acct_refreshing = False
+        self.after(0, self._render_accounts)
         # 定期刷新账号状态
         self.after(5_000, self._refresh_accounts)
 
@@ -263,28 +272,47 @@ class App(ctk.CTk):
             self._acct_row_widgets.extend([row, lbl, btn_toggle, btn_del])
 
     def _toggle_account(self, a_id: str, enabled: bool):
+        # 在后台线程执行，避免阻塞主线程（否则界面会卡住）。
+        threading.Thread(target=self._toggle_account_thread, args=(a_id, enabled), daemon=True).start()
+
+    def _toggle_account_thread(self, a_id: str, enabled: bool):
         try:
             base = f"http://127.0.0.1:{self.port}"
             req = urllib.request.Request(base + "/account/toggle",
                                          data=json.dumps({"id": a_id, "enabled": enabled}).encode(),
                                          headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=4):
-                pass
+            with urllib.request.urlopen(req, timeout=4) as r:
+                code = r.status
+                r.read()
+            if code not in (200, 404):
+                proxy.log("账号切换失败（HTTP %s）", code)
         except Exception as e:
             proxy.log("账号切换失败: %s", e)
-        self._refresh_accounts()
+        self.after(0, self._refresh_accounts)
 
     def _remove_account(self, a_id: str):
+        # 在后台线程执行，避免阻塞主线程（否则界面会卡住）。
+        threading.Thread(target=self._remove_account_thread, args=(a_id,), daemon=True).start()
+
+    def _remove_account_thread(self, a_id: str):
         try:
             base = f"http://127.0.0.1:{self.port}"
             req = urllib.request.Request(base + "/account/remove",
                                          data=json.dumps({"id": a_id}).encode(),
                                          headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=4):
-                pass
+            with urllib.request.urlopen(req, timeout=4) as r:
+                code = r.status
+                r.read()
+            if code == 404:
+                # 账号已经不在池里（可能刚才已被删除过），不算失败。
+                proxy.log("账号 %s 已不存在（可能已删除）", a_id)
+            elif code != 200:
+                proxy.log("账号删除失败（HTTP %s）", code)
+            else:
+                proxy.log("已删除账号 %s", a_id)
         except Exception as e:
             proxy.log("账号删除失败: %s", e)
-        self._refresh_accounts()
+        self.after(0, self._refresh_accounts)
 
     # ---- 日志轮询 ----
     def _start_log_poll(self):
