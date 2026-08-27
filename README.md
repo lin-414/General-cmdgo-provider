@@ -39,6 +39,7 @@ This is an independent Python implementation focused on local OpenAI-compatible 
 - Placeholder-key handling: values such as `cmdgo` do not override the cached OAuth token.
 - Conversion for reasoning content, tool calls, finish reasons, and usage metadata.
 - Local health check, login, logout, and CORS endpoints.
+- Multi-account pool (round-robin scheduling + exponential backoff + failover) to spread quota across several OAuth accounts.
 - Windows start, stop, login, auto-start, and PyInstaller build scripts.
 - Local mock tests and GitHub Actions validation.
 
@@ -163,7 +164,19 @@ print(response.choices[0].message.content)
 | `POST` | `/login` | Start OAuth login |
 | `GET` | `/login/status` | Read login state |
 | `POST` | `/login/cancel` | Cancel an active login |
-| `POST` | `/logout` | Clear the local token |
+| `POST` | `/logout` | Clear the local token and account pool |
+| `GET` | `/account/list` | List pooled accounts (metadata only, never the key) |
+| `POST` | `/account/toggle` | Enable/disable a pooled account |
+| `POST` | `/account/remove` | Remove an account from the pool |
+
+### Multi-account pool
+
+Multiple OAuth logins are harvested into an **account pool** stored at `%APPDATA%\cmdgo-provider\accounts.json`. Each login adds one account; requests rotate across enabled accounts (round-robin) to spread plan quota. A failed request puts that account on an exponential cool-down and the adapter fails over to the next account.
+
+```text
+账号池目录: %APPDATA%\cmdgo-provider\accounts.json
+调度方式:     轮询 + 指数退避（30s → 15min 上限）+ 失败转接
+```
 
 ### Windows scripts
 
@@ -184,9 +197,10 @@ A portable EXE folder should contain the EXEs next to the helper scripts. The to
 The tests use local mock servers and never call the real Command Code gateway:
 
 ```bash
-python -m py_compile cmdgo_provider.py run.py login.py tests/test_mock.py tests/test_cached_auth.py
+python -m py_compile cmdgo_provider.py pool.py run.py login.py tests/test_mock.py tests/test_cached_auth.py tests/test_pool.py
 python tests/test_mock.py
 python tests/test_cached_auth.py
+python tests/test_pool.py
 ```
 
 ### Build Windows EXEs
@@ -222,6 +236,7 @@ Command Code Go 主要面向 Command Code CLI，并且不提供静态 Provider A
 - 兼容 Hermes Studio 的占位 API Key；`cmdgo` 不会覆盖 OAuth token。
 - 支持推理内容、工具调用、结束原因和 usage 信息转换。
 - 提供健康检查、登录、登出和 CORS 接口。
+- 提供多账号池（轮询调度 + 指数退避 + 失败转接），多个 OAuth 账号摊薄额度。
 - 提供 Windows 启动、停止、登录、开机自启和 PyInstaller 打包脚本。
 - 提供流式、非流式、工具调用、usage 和缓存鉴权的 Mock 测试。
 - 提供 GitHub Actions 自动测试。
@@ -310,6 +325,15 @@ API Key: cmdgo
 
 例如 Continue、Cline、Roo Code 或其他允许自定义 OpenAI 兼容接口的扩展。GitHub Copilot 内置 provider 不会自动使用本项目。
 
+### 多号池（账号池）
+
+多次 OAuth 登录会被收集到**账号池**，存于 `%APPDATA%\cmdgo-provider\accounts.json`。每登录一次添加一个账号；请求在启用的账号之间轮询（round-robin）以摊薄套餐额度。某个账号请求失败会进入指数退避冷却，并自动转接到下一个账号。
+
+```text
+账号池目录: %APPDATA%\cmdgo-provider\accounts.json
+调度方式:   轮询 + 指数退避（30s → 15min 上限）+ 失败转接
+```
+
 ### Windows 脚本
 
 脚本位于 `windows/`：
@@ -331,9 +355,10 @@ Token 保存位置：
 ### 测试
 
 ```bash
-python -m py_compile cmdgo_provider.py run.py login.py tests/test_mock.py tests/test_cached_auth.py
+python -m py_compile cmdgo_provider.py pool.py run.py login.py tests/test_mock.py tests/test_cached_auth.py tests/test_pool.py
 python tests/test_mock.py
 python tests/test_cached_auth.py
+python tests/test_pool.py
 ```
 
 ## 来源与许可证

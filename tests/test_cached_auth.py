@@ -6,6 +6,11 @@ spec=importlib.util.spec_from_file_location("m", os.path.join(ROOT,"cmdgo_provid
 cmdgo=importlib.util.module_from_spec(spec); spec.loader.exec_module(cmdgo)
 cmdgo.TOKEN_FILE = os.path.join(tempfile.mkdtemp(prefix="cmdgo-test-"), "token.json")
 cmdgo.cached_api_key = ""
+# isolate the account pool: point it at a throwaway file and empty it
+_pool_tmp = os.path.join(tempfile.mkdtemp(prefix="cmdgo-pool-"), "accounts.json")
+cmdgo.pool._file = _pool_tmp
+cmdgo.pool._loaded = True
+cmdgo.pool._accounts = []
 GP=8805
 class G(BaseHTTPRequestHandler):
     def log_message(self,*a): pass

@@ -25,6 +25,7 @@ pyinstaller --noconfirm --onefile --windowed ^
   --hidden-import PIL.ImageDraw ^
   --hidden-import pystray ^
   --hidden-import pystray._win32 ^
+  --hidden-import pool ^
   cmdgo_gui.py
 
 echo.

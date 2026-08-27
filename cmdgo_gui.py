@@ -104,11 +104,13 @@ class App(ctk.CTk):
         self._running = False
         self._tray_icon = None
         self._tray_thread = None
+        self._accounts = []          # 账号池快照（来自 /account/list）
+        self._acct_row_widgets = []  # 账号列表行控件引用
 
         # 窗口设置
         self.title("cmdgo-provider")
-        self.geometry("520x420")
-        self.minsize(420, 320)
+        self.geometry("560x560")
+        self.minsize(460, 420)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # 设置窗口图标（优先使用打包的 .ico，回退到程序生成的圆形图标）
@@ -181,12 +183,108 @@ class App(ctk.CTk):
         )
         self._btn_tray.pack(side="right")
 
+        # 账号池面板（多号池）
+        self._frame_acct = ctk.CTkFrame(self, corner_radius=10)
+        self._frame_acct.pack(fill="x", padx=12, pady=(4, 4))
+        self._acct_header = ctk.CTkFrame(self._frame_acct, fg_color="transparent")
+        self._acct_header.pack(fill="x", padx=12, pady=(8, 0))
+        self._lbl_acct_title = ctk.CTkLabel(
+            self._acct_header, text="账号池（多号轮询）",
+            font=ctk.CTkFont(family=_system_font_family(), size=13, weight="bold"),
+            text_color="#aaa",
+        )
+        self._lbl_acct_title.pack(side="left")
+        self._lbl_acct_count = ctk.CTkLabel(
+            self._acct_header, text="0 个账号",
+            font=ctk.CTkFont(family=_system_font_family(), size=12),
+            text_color="#4CAF50",
+        )
+        self._lbl_acct_count.pack(side="right")
+        self._acct_list = ctk.CTkScrollableFrame(self._frame_acct, height=96)
+        self._acct_list.pack(fill="x", padx=8, pady=(4, 8))
+        self._refresh_accounts()
+
         # 日志区域
         self._txt_log = ctk.CTkTextbox(
             self, font=ctk.CTkFont(family=_system_font_family(), size=12),
             state="disabled", wrap="word",
         )
         self._txt_log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
+    # ---- 账号池 ----
+    def _refresh_accounts(self):
+        """从 /account/list 拉取账号池并在界面渲染。"""
+        try:
+            base = f"http://127.0.0.1:{self.port}"
+            with urllib.request.urlopen(base + "/account/list", timeout=4) as r:
+                data = json.loads(r.read())
+            self._accounts = data.get("accounts", [])
+        except Exception:
+            # 服务器未就绪时保持空列表
+            self._accounts = []
+        self._render_accounts()
+        # 定期刷新账号状态
+        self.after(5_000, self._refresh_accounts)
+
+    def _render_accounts(self):
+        for w in self._acct_row_widgets:
+            w.destroy()
+        self._acct_row_widgets = []
+        count = len(self._accounts)
+        self._lbl_acct_count.configure(text=f"{count} 个账号")
+        if not self._accounts:
+            hint = ctk.CTkLabel(self._acct_list, text="暂无账号，点击「OAuth 登录」添加多个账号",
+                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color="#666")
+            hint.pack(pady=8)
+            self._acct_row_widgets.append(hint)
+            return
+        for acc in self._accounts:
+            row = ctk.CTkFrame(self._acct_list, fg_color="#1f262f", corner_radius=8)
+            row.pack(fill="x", pady=2, padx=2)
+            # 状态点 + 名称
+            status = "●" if acc.get("enabled") and not acc.get("cooling") else ("◐" if acc.get("cooling") else "○")
+            color = "#4CAF50" if acc.get("enabled") and not acc.get("cooling") else ("#d29922" if acc.get("cooling") else "#f44336")
+            name = acc.get("userName") or acc.get("keyName") or acc.get("id")
+            lbl = ctk.CTkLabel(row, text=f"{status} {name}",
+                               font=ctk.CTkFont(family=_system_font_family(), size=12), text_color=color)
+            lbl.pack(side="left", padx=(10, 4), pady=6)
+            # 小按钮：启用/禁用 + 删除
+            a_id = acc.get("id", "")
+            btn_toggle = ctk.CTkButton(row, text="停用" if acc.get("enabled") else "启用", width=52, height=24,
+                                       font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                       fg_color="#607D8B", hover_color="#455A64",
+                                       command=lambda i=a_id, e=not acc.get("enabled"): self._toggle_account(i, e))
+            btn_toggle.pack(side="right", padx=(2, 4), pady=4)
+            btn_del = ctk.CTkButton(row, text="删除", width=44, height=24,
+                                    font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                    fg_color="#f44336", hover_color="#c62828",
+                                    command=lambda i=a_id: self._remove_account(i))
+            btn_del.pack(side="right", padx=2, pady=4)
+            self._acct_row_widgets.extend([row, lbl, btn_toggle, btn_del])
+
+    def _toggle_account(self, a_id: str, enabled: bool):
+        try:
+            base = f"http://127.0.0.1:{self.port}"
+            req = urllib.request.Request(base + "/account/toggle",
+                                         data=json.dumps({"id": a_id, "enabled": enabled}).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=4):
+                pass
+        except Exception as e:
+            proxy.log("账号切换失败: %s", e)
+        self._refresh_accounts()
+
+    def _remove_account(self, a_id: str):
+        try:
+            base = f"http://127.0.0.1:{self.port}"
+            req = urllib.request.Request(base + "/account/remove",
+                                         data=json.dumps({"id": a_id}).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=4):
+                pass
+        except Exception as e:
+            proxy.log("账号删除失败: %s", e)
+        self._refresh_accounts()
 
     # ---- 日志轮询 ----
     def _start_log_poll(self):
@@ -293,6 +391,7 @@ class App(ctk.CTk):
                 continue
             if st.get("status") == "success" and st.get("hasKey"):
                 proxy.log("登录成功！Go key 已缓存")
+                self.after(0, self._refresh_accounts)
                 break
             if st.get("status") == "error":
                 proxy.log("授权失败: %s", st.get("message", "未知错误"))

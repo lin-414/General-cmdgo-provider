@@ -623,6 +623,8 @@ class LoginManager:
                 cached_api_key = info["apiKey"]
                 _save_cached_key(cached_api_key)
                 log("已缓存 CommandCode apiKey（Go 套餐），后续请求自动使用")
+                # 多号池：把这次登录的 key 入池（已存在则刷新标签）。
+                persist_login_key(info)
             if self.server is not None:
                 try:
                     self.server.shutdown()
@@ -637,6 +639,47 @@ class LoginManager:
 
 
 login = LoginManager()
+
+
+# ---------------------------------------------------------------------------
+# 多账号池（移植自上游 dsh-cmdgo-provider/src/pool.ts）
+# ---------------------------------------------------------------------------
+# 保证 pool 模块可被发现：无论按脚本、按 run.py 还是被测试按文件加载，项目根目录都要在 sys.path。
+_HERE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _HERE_DIR not in sys.path:
+    sys.path.insert(0, _HERE_DIR)
+from pool import AccountPool, POOL_FILE  # noqa: E402
+
+# 账号池：key 与元数据存于 %APPDATA%\cmdgo-provider\accounts.json。
+pool = AccountPool("cmdgo", log)
+pool.adopt_legacy()
+
+
+def pool_status() -> dict:
+    """给客户端/面板用的账号池状态快照（绝不携带明文 key）。"""
+    return {
+        "size": pool.size,
+        "activeCount": pool.active_count(),
+        "accounts": pool.describe_all(),
+    }
+
+
+def persist_login_key(info: dict) -> None:
+    """登录成功后：key 已入池则只刷新标签，否则新增账号入池。"""
+    api_key = info.get("apiKey")
+    if not isinstance(api_key, str) or not api_key:
+        return
+    known = pool.find_by_key(api_key)
+    if known is not None:
+        if info.get("userName") is not None:
+            known.userName = info["userName"]
+        if info.get("keyName") is not None:
+            known.keyName = info["keyName"]
+        log("该 key 已在账号池（%s），仅刷新标签", known.id)
+        pool._persist()
+        return
+    pool.add(info)
+    log("API key 已入池，共 %d 个账号", pool.size)
 
 
 # ---------------------------------------------------------------------------
@@ -684,11 +727,18 @@ def iter_ndjson_lines(resp):
 
 
 def handle_chat(handler, body: dict) -> None:
-    # 优先级：显式环境变量 > OAuth 登录缓存 > 请求里的 Authorization。
+    # 优先级：显式环境变量 > 账号池（轮询调度）> OAuth 登录缓存 > 请求里的 Authorization。
     # Studio 必须发送一个 API Key 字段，但 Go 套餐没有静态 Key；用户填的
     # "cmdgo" 等占位符不能覆盖真正的 OAuth token。只有在没有缓存时，才
     # 允许直接使用请求里的 Bearer 值（便于手工调用/兼容其他客户端）。
-    api_key = OVERRIDE_KEY or cached_api_key or extract_bearer(handler.headers.get("authorization", ""))
+    account = None
+    if OVERRIDE_KEY:
+        api_key = OVERRIDE_KEY
+    elif pool.size > 0:
+        account = pool.pick()
+        api_key = account.apiKey if account is not None else ""
+    else:
+        api_key = cached_api_key or extract_bearer(handler.headers.get("authorization", ""))
     if not api_key:
         send_json(handler, 401, {"error": {"message": "尚未登录 CommandCode：Go 套餐没有静态 API Key，请先 `POST /login` 在浏览器完成账号 OAuth 授权（授权一次即可，key 会自动缓存）。", "type": "invalid_request_error"}})
         return
@@ -699,7 +749,7 @@ def handle_chat(handler, body: dict) -> None:
     model = body.get("model")
     want_stream = body.get("stream") is True
     include_usage = want_stream and isinstance(body.get("stream_options"), dict) and body["stream_options"].get("include_usage") is True
-    log("chat: stream=%s model=%s", want_stream, model)
+    log("chat: stream=%s model=%s account=%s", want_stream, model, account.id if account else "-")
 
     data = json.dumps(envelope).encode("utf-8")
     conn = None
@@ -708,6 +758,8 @@ def handle_chat(handler, body: dict) -> None:
         log("chat: upstream status=%s", upstream.status)
     except Exception as e:
         log("chat: connect threw: %s", e)
+        if account is not None:
+            pool.report_failure(account, f"connect: {e}")
         send_json(handler, 502, {"error": {"message": f"Command Code gateway unreachable: {e}", "type": "server_error"}})
         return
 
@@ -716,12 +768,18 @@ def handle_chat(handler, body: dict) -> None:
             raw = _safe_read(upstream)
             msg = gateway_error_message(raw) or f"Command Code API error (HTTP {upstream.status})"
             st = 401 if upstream.status in (401, 403) else 429 if upstream.status == 429 else 502 if upstream.status >= 500 else 400
+            # 仅对鉴权/限流/服务端错误记账，便于冷却与转接；其他 4xx 不惩罚。
+            if account is not None and upstream.status in (401, 403, 429):
+                pool.report_failure(account, f"upstream {upstream.status}: {msg}")
             send_json(handler, st, {"error": {"message": msg, "type": error_type(upstream.status)}})
             return
 
+        # 拿到成功响应即视为该账号健康；成功记账在流式结束后再确认。
         if not want_stream:
             events = list(iter_ndjson_lines(upstream))
             resp = build_nonstream(model, events, created)
+            if account is not None:
+                pool.report_success(account)
             send_json(handler, 200, resp)
             return
 
@@ -741,8 +799,12 @@ def handle_chat(handler, body: dict) -> None:
                     sse(handler, p)
                 # finish-step events are forwarded by event_to_openai;
                 # do NOT break here — multi-step tool use sends multiple steps
+            if account is not None:
+                pool.report_success(account)
         except Exception as e:
             sse(handler, {"error": {"message": f"stream error: {e}", "type": "api_error"}})
+            if account is not None:
+                pool.report_failure(account, f"stream: {e}")
         sse(handler, "[DONE]")
         handler.wfile.flush()
     finally:
@@ -1002,6 +1064,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
+    def _read_body(self) -> bytes:
+        try:
+            length = int(self.headers.get("content-length", 0))
+        except Exception:
+            length = 0
+        return self.rfile.read(length) if length else b""
+
     def do_OPTIONS(self):
         self._options()
 
@@ -1015,7 +1084,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         if p == "/healthz":
             send_json(self, 200, {"ok": True, "service": "cmdgo-hermes-provider",
-                                  "models": len(model_cache["models"]), "baseUrl": BASE_URL})
+                                  "models": len(model_cache["models"]), "baseUrl": BASE_URL,
+                                  "accounts": pool.size})
+            return
+        if p == "/account/list":
+            send_json(self, 200, {"ok": True, **pool_status()})
             return
         if p in ("", "/"):
             body = _WEB_UI_HTML.replace("__PORT__", str(PORT)).encode("utf-8")
@@ -1056,7 +1129,30 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     os.remove(TOKEN_FILE)
                 except Exception:
                     pass
-                send_json(self, 200, {"ok": True})
+                # 清空多号池（兼容旧语义：池空时保留手动 key）。
+                removed = pool.clear()
+                send_json(self, 200, {"ok": True, "removed": removed})
+                return
+            if p == "/account/list":
+                send_json(self, 200, {"ok": True, **pool_status()})
+                return
+            if p == "/account/toggle":
+                raw = self._read_body()
+                body = json.loads(raw.decode("utf-8", "replace") or "{}")
+                sid = body.get("id", "")
+                enabled = body.get("enabled") is True
+                changed = sid and pool.toggle(sid, enabled)
+                send_json(self, 200 if changed else 404, {"ok": True} if changed else {"ok": False, "error": "账号不存在或状态未变化"})
+                return
+            if p == "/account/remove":
+                raw = self._read_body()
+                body = json.loads(raw.decode("utf-8", "replace") or "{}")
+                sid = body.get("id", "")
+                if not sid:
+                    send_json(self, 400, {"ok": False, "error": "missing id"})
+                    return
+                removed = sid and pool.remove(sid)
+                send_json(self, 200 if removed else 404, {"ok": True} if removed else {"ok": False, "error": "账号不存在"})
                 return
         except Exception as e:
             send_json(self, 500, {"error": {"message": str(e), "type": "api_error"}})
