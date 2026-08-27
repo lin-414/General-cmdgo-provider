@@ -1161,7 +1161,7 @@ def _run_login_flow(port: int) -> int:
 
 
 def _run_gui():
-    """启动代理服务器 + 原生 GUI 窗口（Edge WebView2）。"""
+    """启动代理服务器 + 原生 GUI 窗口 + 系统托盘常驻。"""
     try:
         import webview
     except ImportError:
@@ -1186,20 +1186,89 @@ def _run_gui():
         start_server(block=True)
         return
 
-    log("GUI 窗口已打开 (http://127.0.0.1:%s)", PORT)
-    # 直接注入 HTML，避免 URL 加载时序问题；替换端口占位符
     html = _WEB_UI_HTML.replace("__PORT__", str(PORT))
-    window = webview.create_window(
-        f"cmdgo-provider  ·  localhost:{PORT}",
-        html=html,
-        width=960,
-        height=720,
-        min_size=(640, 480),
-        text_select=True,
-    )
-    # webview.start() 会阻塞直到窗口关闭；关闭后退出进程
-    webview.start(debug=False)
-    log("GUI 窗口已关闭，退出")
+
+    # ---- 系统托盘 ----
+    _state = {"exit": False, "show": True}
+    _win = [None]                       # 当前窗口引用（可变容器供闭包使用）
+    _tray = [None]
+
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+
+        def _make_icon():
+            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.rounded_rectangle([2, 2, 62, 62], radius=10, fill="#3fb950")
+            d.rounded_rectangle([6, 6, 58, 58], radius=8, fill="#238636")
+            d.text((18, 10), "C", fill="#e6edf3")
+            return img
+
+        def _on_show(icon, item):
+            _state["show"] = True
+
+        def _on_exit(icon, item):
+            _state["exit"] = True
+            _state["show"] = True
+            w = _win[0]
+            if w:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+        _tray[0] = pystray.Icon(
+            "cmdgo-provider", _make_icon(), "cmdgo-provider",
+            menu=pystray.Menu(
+                pystray.MenuItem("显示窗口", _on_show, default=True),
+                pystray.MenuItem("退出", _on_exit),
+            ),
+        )
+        threading.Thread(target=_tray[0].run, daemon=True).start()
+        time.sleep(0.3)
+        log("系统托盘已就绪")
+    except ImportError:
+        log("pystray 未安装，无托盘支持（pip install pystray pillow）")
+
+    # ---- GUI 循环：窗口关闭 → 最小化到托盘；托盘双击 → 重新打开 ----
+    while not _state["exit"]:
+        _state["show"] = False
+        log("GUI 窗口已打开 (http://127.0.0.1:%s)", PORT)
+        w = webview.create_window(
+            f"cmdgo-provider  ·  localhost:{PORT}",
+            html=html,
+            width=960,
+            height=720,
+            min_size=(640, 480),
+            text_select=True,
+        )
+        _win[0] = w
+        webview.start(debug=False)
+        _win[0] = None
+
+        if _state["exit"]:
+            break
+
+        if _tray[0]:
+            log("窗口已最小化到系统托盘")
+            while not _state["show"] and not _state["exit"]:
+                time.sleep(0.3)
+        else:
+            # 无托盘：窗口关闭即退出
+            break
+
+    # 清理
+    if _tray[0]:
+        try:
+            _tray[0].stop()
+        except Exception:
+            pass
+    log("已退出")
 
 
 def main():

@@ -5,7 +5,7 @@ cd /d "%~dp0.."
 where pyinstaller >nul 2>nul
 if errorlevel 1 (
   echo PyInstaller was not found.
-  echo Install it with: python -m pip install pyinstaller pywebview
+  echo Install it with: python -m pip install pyinstaller pywebview pystray pillow
   exit /b 1
 )
 
@@ -18,6 +18,11 @@ pyinstaller --noconfirm --onefile --console --name cmdgo-provider ^
   --hidden-import=webview.platforms.edgechromium ^
   --hidden-import=clr_loader ^
   --hidden-import=pythonnet ^
+  --hidden-import=pystray ^
+  --hidden-import=pystray._win32 ^
+  --hidden-import=PIL ^
+  --hidden-import=PIL.Image ^
+  --hidden-import=PIL.ImageDraw ^
   cmdgo_provider.py
 
 echo.
