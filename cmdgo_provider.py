@@ -790,6 +790,7 @@ _WEB_UI_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>cmdgo-provider</title>
+<script>const API='http://127.0.0.1:__PORT__';</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--dim:#8b949e;
@@ -888,9 +889,9 @@ function addLog(msg) {
 async function poll() {
   try {
     const [h, s, m] = await Promise.all([
-      fetch('/healthz').then(r => r.json()),
-      fetch('/login/status').then(r => r.json()),
-      fetch('/v1/models').then(r => r.json()),
+      fetch(API+'/healthz').then(r => r.json()),
+      fetch(API+'/login/status').then(r => r.json()),
+      fetch(API+'/v1/models').then(r => r.json()),
     ]);
 
     // 状态
@@ -938,7 +939,7 @@ async function doLogin() {
   $('#btn-login').textContent = '登录中…';
   addLog('正在发起 OAuth 登录…');
   try {
-    const r = await fetch('/login', {method: 'POST', headers: {'Content-Type': 'application/json'}});
+    const r = await fetch(API+'/login', {method: 'POST', headers: {'Content-Type': 'application/json'}});
     const j = await r.json();
     if (j.ok && j.authUrl) {
       addLog('请在浏览器中完成授权');
@@ -947,7 +948,7 @@ async function doLogin() {
       let ok = false;
       for (let i = 0; i < 400; i++) {
         await new Promise(r => setTimeout(r, 1500));
-        const st = await fetch('/login/status').then(r => r.json());
+        const st = await fetch(API+'/login/status').then(r => r.json());
         if (st.status === 'success' && st.hasKey) {
           addLog('登录成功！');
           ok = true;
@@ -972,7 +973,7 @@ async function doLogin() {
 
 async function doLogout() {
   try {
-    await fetch('/logout', {method: 'POST'});
+    await fetch(API+'/logout', {method: 'POST'});
     addLog('已退出登录');
   } catch (e) {}
   poll();
@@ -1017,7 +1018,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                   "models": len(model_cache["models"]), "baseUrl": BASE_URL})
             return
         if p in ("", "/"):
-            body = _WEB_UI_HTML.encode("utf-8")
+            body = _WEB_UI_HTML.replace("__PORT__", str(PORT)).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1186,9 +1187,11 @@ def _run_gui():
         return
 
     log("GUI 窗口已打开 (http://127.0.0.1:%s)", PORT)
+    # 直接注入 HTML，避免 URL 加载时序问题；替换端口占位符
+    html = _WEB_UI_HTML.replace("__PORT__", str(PORT))
     window = webview.create_window(
         f"cmdgo-provider  ·  localhost:{PORT}",
-        url=f"http://127.0.0.1:{PORT}/",
+        html=html,
         width=960,
         height=720,
         min_size=(640, 480),
