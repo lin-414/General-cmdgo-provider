@@ -9,6 +9,7 @@ cmdgo-provider 图形界面 — 现代深色主题 + 系统托盘常驻。
 from __future__ import annotations
 
 import argparse
+import ctypes
 import io
 import json
 import logging
@@ -489,8 +490,41 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8787")))
     args = ap.parse_args()
 
+    # 单实例保护：用命名互斥量避免启动第二个实例。
+    # 否则会再注册一个托盘图标、且第二个实例的服务器绑不上 8787 端口。
+    _acquire_single_instance()
+
     app = App(port=args.port)
     app.mainloop()
+
+
+# 全局保持对互斥量句柄的引用（GC 不释放即锁持有）。
+_INSTANCE_MUTEX = None
+
+
+def _acquire_single_instance(name: str = "Global\\cmdgo-provider-gui") -> bool:
+    """尝试获取单实例互斥量；若已有实例在运行则立即退出进程。
+
+    返回 True 表示当前进程是唯一实例（可继续运行）；返回 False 表示已有实例。
+    Windows 下返回 ERROR_ALREADY_EXISTS (183) 即已有实例在运行。
+    """
+    global _INSTANCE_MUTEX
+    try:
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, name)
+        if handle:
+            _INSTANCE_MUTEX = handle  # 保持引用，避免句柄被 GC 释放
+            if ctypes.windll.kernel32.GetLastError() == 183:
+                # 已有实例在运行：直接退出，避免第二个托盘图标。不弹窗，避免阻塞。
+                try:
+                    sys.exit(0)
+                except SystemExit:
+                    raise
+        else:
+            raise ctypes.WinError(ctypes.windll.kernel32.GetLastError())
+    except Exception:
+        # 非 Windows 或拿不到互斥量：不阻断运行。
+        pass
+    return True
 
 
 if __name__ == "__main__":
