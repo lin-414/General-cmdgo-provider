@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -108,6 +109,9 @@ class App(ctk.CTk):
         self._accounts = []          # 账号池快照（来自 /account/list）
         self._acct_row_widgets = []  # 账号列表行控件引用
         self._acct_refreshing = False  # 防止并发账号刷新
+        # 跨线程安全调度：所有非主线程对 UI 的更新都入队，由主循环轮询执行。
+        self._dispatch_q: "queue.Queue" = queue.Queue()
+        self._dispatch_started = False
 
         # 窗口设置
         self.title("cmdgo-provider")
@@ -121,9 +125,49 @@ class App(ctk.CTk):
 
         self._build_ui()
         self._start_log_poll()
+        self._start_dispatch()
 
         # 自动启动代理
         self.after(300, self._toggle_proxy)
+
+    # ---- 跨线程安全调度 ----
+    def _start_dispatch(self):
+        """启动主循环轮询器，专门处理从任何线程投递过来的 UI 更新。
+
+        tkinter 的 ``after()`` 只能从主线程调用；若从后台线程调用会破坏 Tcl
+        解释器，导致界面长时间后"未响应"。因此所有跨线程 UI 更新统一走队列。
+        """
+        if self._dispatch_started:
+            return
+        self._dispatch_started = True
+        self.after(50, self._drain_dispatch)
+
+    def _dispatch(self, fn, *args, delay=0, **kwargs):
+        """线程安全地把一个可调用对象投递给主循环（可在任何线程调用）。
+
+        delay>0 时，投递给主循环后再用 after 延迟触发（只在主线程内调用 after）。
+        """
+        if delay and delay > 0:
+            self._dispatch_q.put((self._after_wrap, (fn, args, kwargs, delay), {}))
+        else:
+            self._dispatch_q.put((fn, args, kwargs))
+
+    def _after_wrap(self, fn, args, kwargs, delay):
+        """在主线程内用 after 延迟触发某个可调用对象。"""
+        self.after(delay, lambda: self._dispatch(fn, *args, **kwargs))
+
+    def _drain_dispatch(self):
+        while True:
+            try:
+                fn, args, kwargs = self._dispatch_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass
+        if self._dispatch_started:
+            self.after(50, self._drain_dispatch)
 
     def _load_window_icon(self):
         """尝试加载打包的 assets/icon.ico 作为窗口图标，失败则回退到内置圆形图标。"""
@@ -232,9 +276,10 @@ class App(ctk.CTk):
             self._accounts = []
         finally:
             self._acct_refreshing = False
-        self.after(0, self._render_accounts)
+        # 线程安全投递到主循环执行（不可直接调用 self.after/set 控件）。
+        self._dispatch(self._render_accounts)
         # 定期刷新账号状态
-        self.after(5_000, self._refresh_accounts)
+        self._dispatch(self._refresh_accounts, delay=5_000)
 
     def _render_accounts(self):
         for w in self._acct_row_widgets:
@@ -289,7 +334,7 @@ class App(ctk.CTk):
                 proxy.log("账号切换失败（HTTP %s）", code)
         except Exception as e:
             proxy.log("账号切换失败: %s", e)
-        self.after(0, self._refresh_accounts)
+        self._dispatch(self._refresh_accounts)
 
     def _remove_account(self, a_id: str):
         # 在后台线程执行，避免阻塞主线程（否则界面会卡住）。
@@ -313,7 +358,7 @@ class App(ctk.CTk):
                 proxy.log("已删除账号 %s", a_id)
         except Exception as e:
             proxy.log("账号删除失败: %s", e)
-        self.after(0, self._refresh_accounts)
+        self._dispatch(self._refresh_accounts)
 
     # ---- 日志轮询 ----
     def _start_log_poll(self):
@@ -329,8 +374,21 @@ class App(ctk.CTk):
         self._txt_log.configure(state="normal")
         for line in lines:
             self._txt_log.insert("end", line + "\n")
+        # 限制日志行数，避免长时间运行后 Tk 控件过大拖慢界面。
+        self._trim_log()
         self._txt_log.see("end")
         self._txt_log.configure(state="disabled")
+
+    # 日志区最多保留的行数（超出则从头部删除）。
+    _LOG_MAX_LINES = 800
+
+    def _trim_log(self):
+        try:
+            too_many = int(self._txt_log.index("end-1c").split(".")[0]) - self._LOG_MAX_LINES
+            if too_many > 0:
+                self._txt_log.delete("1.0", f"{too_many + 1}.0")
+        except Exception:
+            pass
 
     # ---- 代理控制 ----
     def _toggle_proxy(self):
@@ -393,12 +451,12 @@ class App(ctk.CTk):
                 j = json.loads(r.read())
         except Exception as e:
             proxy.log("登录请求失败: %s", e)
-            self.after(0, lambda: self._btn_login.configure(state="normal", text="OAuth 登录"))
+            self._dispatch(lambda: self._btn_login.configure(state="normal", text="OAuth 登录"))
             return
 
         if not j.get("ok"):
             proxy.log("登录启动失败: %s", j)
-            self.after(0, lambda: self._btn_login.configure(state="normal", text="OAuth 登录"))
+            self._dispatch(lambda: self._btn_login.configure(state="normal", text="OAuth 登录"))
             return
 
         auth_url = j["authUrl"]
@@ -420,7 +478,7 @@ class App(ctk.CTk):
                 continue
             if st.get("status") == "success" and st.get("hasKey"):
                 proxy.log("登录成功！Go key 已缓存")
-                self.after(0, self._refresh_accounts)
+                self._dispatch(self._refresh_accounts)
                 break
             if st.get("status") == "error":
                 proxy.log("授权失败: %s", st.get("message", "未知错误"))
@@ -429,7 +487,7 @@ class App(ctk.CTk):
         else:
             proxy.log("登录超时（10 分钟）")
 
-        self.after(0, lambda: self._btn_login.configure(state="normal", text="OAuth 登录"))
+        self._dispatch(lambda: self._btn_login.configure(state="normal", text="OAuth 登录"))
 
     # ---- 系统托盘 ----
     def _minimize_to_tray(self):
@@ -441,18 +499,15 @@ class App(ctk.CTk):
         import pystray
 
         def on_show(icon, item):
-            self.after(0, self._restore_from_tray)
+            self._dispatch(self._restore_from_tray)
 
         def on_quit(icon, item):
-            icon.stop()
-            self.after(0, self._quit_app)
+            self._dispatch(self._quit_app)
 
         def on_toggle(icon, item):
-            self.after(0, self._toggle_proxy)
-            # 更新图标颜色
-            time.sleep(0.3)
-            color = "#4CAF50" if self._running else "#f44336"
-            icon.icon = _make_tray_icon(color)
+            self._dispatch(self._toggle_proxy)
+            # 更新图标颜色（在队列中执行，避免阻塞 pystray 线程）
+            self._dispatch(self._refresh_tray_color, icon)
 
         menu = pystray.Menu(
             pystray.MenuItem("显示窗口", on_show, default=True),
@@ -467,6 +522,17 @@ class App(ctk.CTk):
         )
         self._tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
         self._tray_thread.start()
+
+    def _refresh_tray_color(self, icon=None):
+        """刷新托盘图标颜色（在主子线程线程安全地执行）。"""
+        try:
+            color = "#4CAF50" if self._running else "#f44336"
+            if icon is not None:
+                icon.icon = _make_tray_icon(color)
+            elif self._tray_icon is not None:
+                self._tray_icon.icon = _make_tray_icon(color)
+        except Exception:
+            pass
 
     def _restore_from_tray(self):
         self.deiconify()
