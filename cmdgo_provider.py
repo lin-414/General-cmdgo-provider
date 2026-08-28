@@ -75,15 +75,14 @@ log = logging.getLogger("cmdgo-provider").info
 # ---------------------------------------------------------------------------
 # API Key 缓存（Go 套餐没有静态 Key，走账号 OAuth；登录后缓存 Bearer token）
 # ---------------------------------------------------------------------------
-def _data_dir() -> str:
-    """Return a writable per-user data directory."""
-    if os.name == "nt":
-        root = os.environ.get("APPDATA") or os.path.expanduser("~")
-    else:
-        root = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    path = os.path.join(root, "cmdgo-provider")
-    os.makedirs(path, exist_ok=True)
-    return path
+# ---------------------------------------------------------------------------
+# 项目内模块导入（pool 与本文件共用同一个数据目录；先保证项目根目录在 sys.path，
+# 无论按脚本、按 run.py 还是被测试按文件加载都能找到）
+# ---------------------------------------------------------------------------
+_HERE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _HERE_DIR not in sys.path:
+    sys.path.insert(0, _HERE_DIR)
+from pool import AccountPool, POOL_FILE, data_dir as _data_dir  # noqa: E402
 
 
 TOKEN_FILE = os.path.join(_data_dir(), "token.json")
@@ -152,8 +151,13 @@ def extract_bearer(h) -> str:
     return ""
 
 
+# CLI 网关的 x-session-id 语义是「每个 CLI 会话一个」；进程内保持不变，
+# 若每个请求都换新值，上游看到的会话数会被放大。
+SESSION_ID = "cli-" + datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+
+
 def build_session_id() -> str:
-    return "cli-" + datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    return SESSION_ID
 
 
 def fingerprint_headers(api_key: str) -> dict:
@@ -179,18 +183,6 @@ def gateway_error_message(body: str):
     except Exception:
         pass
     return None
-
-
-def error_type(status: int) -> str:
-    if status in (401, 403):
-        return "authentication_error"
-    if status == 429:
-        return "rate_limit_exceeded"
-    if status == 400:
-        return "invalid_request_error"
-    if status >= 500:
-        return "server_error"
-    return "api_error"
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +318,18 @@ def map_finish_reason(raw) -> str:
     return "stop"
 
 
+def event_error_message(event: dict) -> str:
+    msg = event.get("message")
+    if isinstance(msg, str) and msg:
+        return msg
+    err = event.get("error")
+    if isinstance(err, dict) and isinstance(err.get("message"), str) and err["message"]:
+        return err["message"]
+    if isinstance(err, str) and err:
+        return err
+    return "unknown Command Code stream error"
+
+
 def event_to_openai(event: dict, state: dict):
     out = []
     t = event.get("type")
@@ -365,13 +369,16 @@ def event_to_openai(event: dict, state: dict):
                     "total_tokens": usage.get("inputTokens", 0) + usage.get("outputTokens", 0),
                 },
             })
-        out.append({
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": map_finish_reason(event.get("finishReason") or event.get("rawFinishReason")),
-            }],
-        })
+        # finish_reason 暂存在 state 里，由 handle_chat 在整条流结束时统一发一次。
+        # 多步工具流会送来多个 finish-step，而 OpenAI 协议里 finish_reason 是终态，
+        # 中间步骤就发出去会让部分客户端提前收尾、丢掉后续步骤的内容。
+        state["finishReason"] = map_finish_reason(event.get("finishReason") or event.get("rawFinishReason"))
+    elif t == "error":
+        # 网关在 200 流中回 error 事件：转发给客户端，而不是静默吞掉返回空回复。
+        msg = event_error_message(event)
+        state["sawError"] = True
+        state["errorMessage"] = msg
+        out.append({"error": {"message": msg, "type": "api_error"}})
     return out
 
 
@@ -382,6 +389,9 @@ def build_nonstream(model: str, events: list, created: int) -> dict:
     finish_reason = "stop"
     usage = None
     for ev in events:
+        if ev.get("type") == "error":
+            # 网关在 200 响应里夹带 error 事件：抛出让调用方回 502，而不是返回空成功。
+            raise ValueError(event_error_message(ev))
         if ev.get("type") == "text-delta":
             text += ev.get("text", "")
         elif ev.get("type") == "reasoning-delta":
@@ -482,6 +492,8 @@ class LoginManager:
                 "hasKey": bool(cached_api_key),
             }
         result = dict(self.last_result)
+        # 状态查询是给面板/轮询用的，绝不回传明文 apiKey（历史上登出后仍会残留在响应里）。
+        result.pop("apiKey", None)
         result["hasKey"] = bool(cached_api_key)
         return result
 
@@ -518,7 +530,12 @@ class LoginManager:
                     self.server.server_close()
                 except Exception:
                     pass
-                self.server = None
+                # 通知等待者登录已取消：轮询方（GUI/Web/login.py）读到 cancelled 即刻退出，
+                # 不必空等到 10 分钟超时。
+                self.last_result = {"status": "cancelled", "message": reason, "at": int(time.time() * 1000)}
+                self._result = None
+                self._event.set()
+            self.server = None
             self.expected_state = None
             self.auth_url = None
             self.callback_url = None
@@ -644,12 +661,6 @@ login = LoginManager()
 # ---------------------------------------------------------------------------
 # 多账号池（移植自上游 dsh-cmdgo-provider/src/pool.ts）
 # ---------------------------------------------------------------------------
-# 保证 pool 模块可被发现：无论按脚本、按 run.py 还是被测试按文件加载，项目根目录都要在 sys.path。
-_HERE_DIR = os.path.dirname(os.path.abspath(__file__))
-if _HERE_DIR not in sys.path:
-    sys.path.insert(0, _HERE_DIR)
-from pool import AccountPool, POOL_FILE  # noqa: E402
-
 # 账号池：key 与元数据存于 %APPDATA%\cmdgo-provider\accounts.json。
 pool = AccountPool("cmdgo", log)
 pool.adopt_legacy()
@@ -726,30 +737,46 @@ def iter_ndjson_lines(resp):
                 pass
 
 
-def handle_chat(handler, body: dict) -> None:
-    # 优先级：显式环境变量 > 账号池（轮询调度）> OAuth 登录缓存 > 请求里的 Authorization。
-    # Studio 必须发送一个 API Key 字段，但 Go 套餐没有静态 Key；用户填的
-    # "cmdgo" 等占位符不能覆盖真正的 OAuth token。只有在没有缓存时，才
-    # 允许直接使用请求里的 Bearer 值（便于手工调用/兼容其他客户端）。
-    account = None
+def _chat_candidates(handler) -> list:
+    """按优先级生成 (api_key, account) 候选列表：
+    环境变量覆盖 > 账号池（全部启用账号，轮询顺序）> OAuth 登录缓存 > 请求头 Bearer。
+    Studio 必须发送一个 API Key 字段，但 Go 套餐没有静态 Key；用户填的
+    "cmdgo" 等占位符不能覆盖真正的 OAuth token。"""
     if OVERRIDE_KEY:
-        api_key = OVERRIDE_KEY
-    elif pool.size > 0:
-        account = pool.pick()
-        api_key = account.apiKey if account is not None else ""
-    else:
-        api_key = cached_api_key or extract_bearer(handler.headers.get("authorization", ""))
-    if not api_key:
-        send_json(handler, 401, {"error": {"message": "尚未登录 CommandCode：Go 套餐没有静态 API Key，请先 `POST /login` 在浏览器完成账号 OAuth 授权（授权一次即可，key 会自动缓存）。", "type": "invalid_request_error"}})
-        return
+        return [(OVERRIDE_KEY, None)]
+    if pool.size > 0:
+        first = pool.pick()
+        if first is None:
+            # 池非空但全部停用：回落到缓存/请求头，而不是直接报未登录。
+            key = cached_api_key or extract_bearer(handler.headers.get("authorization", ""))
+            return [(key, None)] if key else []
+        seen = {first.id}
+        out = [(first.apiKey, first)]
+        for _ in range(pool.size - 1):
+            nxt = pool.pick()
+            if nxt is None or nxt.id in seen:
+                break  # 已无新的启用账号（全部冷却时 pick 会重复同一账号）
+            seen.add(nxt.id)
+            out.append((nxt.apiKey, nxt))
+        return [(k, a) for k, a in out if k]
+    key = cached_api_key or extract_bearer(handler.headers.get("authorization", ""))
+    return [(key, None)] if key else []
 
+
+def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
+    """发起一次上游请求并完整处理响应。
+
+    返回 (outcome, failure)：
+      ok         成功响应已完整发给客户端
+      stream_err 流式响应已开始后出错（已向客户端发送错误，不可换号重试）
+      error      尚未向客户端发送任何字节；failure=(status, message, err_type, retryable)
+    """
     envelope = openai_to_cc_envelope(body)
     headers = fingerprint_headers(api_key)
-    created = int(time.time())
     model = body.get("model")
     want_stream = body.get("stream") is True
     include_usage = want_stream and isinstance(body.get("stream_options"), dict) and body["stream_options"].get("include_usage") is True
-    log("chat: stream=%s model=%s account=%s", want_stream, model, account.id if account else "-")
+    log("chat: attempt model=%s account=%s stream=%s", model, account.id if account else "-", want_stream)
 
     data = json.dumps(envelope).encode("utf-8")
     conn = None
@@ -760,28 +787,40 @@ def handle_chat(handler, body: dict) -> None:
         log("chat: connect threw: %s", e)
         if account is not None:
             pool.report_failure(account, f"connect: {e}")
-        send_json(handler, 502, {"error": {"message": f"Command Code gateway unreachable: {e}", "type": "server_error"}})
-        return
+        return "error", (502, f"Command Code gateway unreachable: {e}", "server_error", True)
 
     try:
         if upstream.status >= 400:
             raw = _safe_read(upstream)
             msg = gateway_error_message(raw) or f"Command Code API error (HTTP {upstream.status})"
-            st = 401 if upstream.status in (401, 403) else 429 if upstream.status == 429 else 502 if upstream.status >= 500 else 400
-            # 仅对鉴权/限流/服务端错误记账，便于冷却与转接；其他 4xx 不惩罚。
+            # 网关把「模型不存在」也回 401；改写成 400，避免客户端误判为鉴权故障。
+            if upstream.status == 401 and "not recognized" in msg.lower():
+                return "error", (400, msg, "invalid_request_error", False)
+            if upstream.status in (401, 403):
+                st, et, retry = 401, "authentication_error", True
+            elif upstream.status == 429:
+                st, et, retry = 429, "rate_limit_exceeded", True
+            elif upstream.status >= 500:
+                st, et, retry = 502, "server_error", True
+            else:
+                st, et, retry = 400, "invalid_request_error", False
+            # 仅对鉴权/限流错误记账，便于冷却与转接；其他 4xx 不惩罚。
             if account is not None and upstream.status in (401, 403, 429):
                 pool.report_failure(account, f"upstream {upstream.status}: {msg}")
-            send_json(handler, st, {"error": {"message": msg, "type": error_type(upstream.status)}})
-            return
+            return "error", (st, msg, et, retry)
 
-        # 拿到成功响应即视为该账号健康；成功记账在流式结束后再确认。
         if not want_stream:
-            events = list(iter_ndjson_lines(upstream))
-            resp = build_nonstream(model, events, created)
+            try:
+                events = list(iter_ndjson_lines(upstream))
+                resp = build_nonstream(model, events, created)
+            except ValueError as e:  # 网关在 200 流里回了 error 事件
+                if account is not None:
+                    pool.report_failure(account, f"upstream error event: {e}")
+                return "error", (502, str(e), "api_error", True)
+            send_json(handler, 200, resp)
             if account is not None:
                 pool.report_success(account)
-            send_json(handler, 200, resp)
-            return
+            return "ok", None
 
         # streaming
         handler.send_response(200)
@@ -797,16 +836,31 @@ def handle_chat(handler, body: dict) -> None:
             for ev in iter_ndjson_lines(upstream):
                 for p in event_to_openai(ev, state):
                     sse(handler, p)
-                # finish-step events are forwarded by event_to_openai;
-                # do NOT break here — multi-step tool use sends multiple steps
             if account is not None:
-                pool.report_success(account)
+                if state.get("sawError"):
+                    pool.report_failure(account, f"upstream error event: {state.get('errorMessage', '')}")
+                else:
+                    pool.report_success(account)
+            if not state.get("sawError"):
+                # finish_reason 只在此刻发一次（中间步骤的已暂存丢弃）。
+                sse(handler, {"choices": [{"index": 0, "delta": {}, "finish_reason": state.get("finishReason", "stop")}]})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 客户端主动断开（ZCode 停止/超时）不是账号的问题：不记账，也不再写响应。
+            log("chat: client disconnected mid-stream")
+            return "stream_err", None
         except Exception as e:
-            sse(handler, {"error": {"message": f"stream error: {e}", "type": "api_error"}})
+            try:
+                sse(handler, {"error": {"message": f"stream error: {e}", "type": "api_error"}})
+            except Exception:
+                pass
             if account is not None:
                 pool.report_failure(account, f"stream: {e}")
-        sse(handler, "[DONE]")
-        handler.wfile.flush()
+        try:
+            sse(handler, "[DONE]")
+            handler.wfile.flush()
+        except Exception:
+            pass
+        return ("stream_err" if state.get("sawError") else "ok"), None
     finally:
         try:
             upstream.close()
@@ -816,6 +870,29 @@ def handle_chat(handler, body: dict) -> None:
             conn.close()
         except Exception:
             pass
+
+
+def handle_chat(handler, body: dict) -> None:
+    created = int(time.time())
+    candidates = _chat_candidates(handler)
+    if not candidates:
+        send_json(handler, 401, {"error": {"message": "尚未登录 CommandCode：Go 套餐没有静态 API Key，请先 `POST /login` 在浏览器完成账号 OAuth 授权（授权一次即可，key 会自动缓存）。", "type": "invalid_request_error"}})
+        return
+
+    log("chat: stream=%s model=%s candidates=%d", body.get("stream") is True, body.get("model"), len(candidates))
+    last_failure = None
+    for i, (api_key, account) in enumerate(candidates):
+        outcome, failure = _attempt_chat(handler, body, api_key, account, created)
+        if outcome != "error":
+            return  # 响应已发给客户端（成功，或流开始后出错无法重试）
+        status, msg, etype, retryable = failure
+        last_failure = failure
+        if not retryable or i == len(candidates) - 1:
+            break
+        # 同请求内 failover：该账号限流/鉴权失败/网关错误，换下一个候选账号重试。
+        log("chat: account %s failed (HTTP %s)，转接下一个账号", account.id if account else "-", status)
+    status, msg, etype, _ = last_failure
+    send_json(handler, status, {"error": {"message": msg, "type": etype}})
 
 
 def _open_stream(url: str, data: bytes, headers: dict):
@@ -982,11 +1059,18 @@ async function poll() {
       $('#btn-logout').style.display = 'none';
     }
 
-    // 模型
+    // 模型列表
     const models = m.data || [];
     const list = $('#model-list');
     if (models.length) {
-      list.innerHTML = models.map(x => '<span class="tag">' + x.id + '</span>').join('');
+      // 用 textContent 而不是 innerHTML：模型 id 来自上游接口，避免注入。
+      list.textContent = '';
+      for (const x of models) {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = x.id;
+        list.appendChild(tag);
+      }
     } else {
       list.textContent = '暂无模型';
     }
@@ -1016,8 +1100,8 @@ async function doLogin() {
           ok = true;
           break;
         }
-        if (st.status === 'error') {
-          addLog('授权失败: ' + (st.message || '未知错误'));
+        if (st.status === 'error' || st.status === 'cancelled') {
+          addLog((st.status === 'cancelled' ? '登录已取消: ' : '授权失败: ') + (st.message || '未知错误'));
           break;
         }
       }
@@ -1129,6 +1213,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     os.remove(TOKEN_FILE)
                 except Exception:
                     pass
+                # 重置登录状态：否则 /login/status 会残留上次登录结果（含明文 apiKey）。
+                login.last_result = {"status": "idle"}
                 # 清空多号池（兼容旧语义：池空时保留手动 key）。
                 removed = pool.clear()
                 send_json(self, 200, {"ok": True, "removed": removed})
@@ -1155,14 +1241,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 send_json(self, 200 if removed else 404, {"ok": True} if removed else {"ok": False, "error": "账号不存在"})
                 return
         except Exception as e:
-            send_json(self, 500, {"error": {"message": str(e), "type": "api_error"}})
+            # 兜底响应本身也可能写到已断开的客户端上，不能再让异常逃逸成 traceback。
+            try:
+                send_json(self, 500, {"error": {"message": str(e), "type": "api_error"}})
+            except Exception:
+                pass
             return
         send_json(self, 404, {"error": {"message": "Not found", "type": "invalid_request_error"}})
 
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Windows 的 SO_REUSEADDR 允许绑定到正在监听的端口（等于端口劫持），只在非 Windows 启用。
+    allow_reuse_address = os.name != "nt"
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ from typing import Optional
 COOLDOWN_BASE_MS = 30_000
 # 指数冷却上限。
 COOLDOWN_MAX_MS = 15 * 60_000
+# 距上次失败超过该时长视为已恢复：failCount 清零、冷却从基础值重新上升。
+# 否则昨天连败的账号今天第一次失败就直接顶格冷却 15 分钟。
+FAIL_DECAY_MS = 30 * 60_000
 
 
 def _data_dir() -> str:
@@ -38,6 +41,9 @@ def _data_dir() -> str:
 
 POOL_FILE = os.path.join(_data_dir(), "accounts.json")
 
+# 供外部复用（cmdgo_provider 的 token.json 也在同一数据目录），避免两处重复实现。
+data_dir = _data_dir
+
 
 class PoolAccount:
     """池中的一个账号。id 稳定、唯一；key 直接保存在本记录里（本项目做法）。"""
@@ -46,7 +52,7 @@ class PoolAccount:
                  keyName: Optional[str] = None, addedAt: Optional[int] = None,
                  enabled: bool = True, failCount: int = 0,
                  cooldownUntil: Optional[int] = None, lastError: Optional[str] = None,
-                 lastUsedAt: Optional[int] = None) -> None:
+                 lastUsedAt: Optional[int] = None, lastFailAt: Optional[int] = None) -> None:
         self.id = id
         self.apiKey = apiKey
         self.userName = userName
@@ -57,6 +63,7 @@ class PoolAccount:
         self.cooldownUntil = cooldownUntil
         self.lastError = lastError
         self.lastUsedAt = lastUsedAt
+        self.lastFailAt = lastFailAt
 
     def to_dict(self) -> dict:
         """序列化为 manifest 行（不对外暴露 API key 明文的查看接口除外，这里完整落地）。"""
@@ -77,6 +84,8 @@ class PoolAccount:
             d["lastError"] = self.lastError
         if self.lastUsedAt is not None:
             d["lastUsedAt"] = self.lastUsedAt
+        if self.lastFailAt is not None:
+            d["lastFailAt"] = self.lastFailAt
         return d
 
     @property
@@ -107,6 +116,7 @@ class PoolAccount:
             cooldownUntil=d.get("cooldownUntil"),
             lastError=d.get("lastError"),
             lastUsedAt=d.get("lastUsedAt"),
+            lastFailAt=d.get("lastFailAt"),
         )
 
 
@@ -176,8 +186,10 @@ class AccountPool:
             return len(self._accounts)
 
     def active_count(self, now: Optional[int] = None) -> int:
-        now = now if now is not None else int(time.time() * 1000)
-        return sum(1 for a in self._accounts if a.enabled and (a.cooldownUntil or 0) <= now)
+        with self._lock:
+            self._ensure_loaded()
+            now = now if now is not None else int(time.time() * 1000)
+            return sum(1 for a in self._accounts if a.enabled and (a.cooldownUntil or 0) <= now)
 
     def _find(self, account_id: str) -> Optional[PoolAccount]:
         for a in self._accounts:
@@ -254,26 +266,34 @@ class AccountPool:
 
     # ---- 记账 ----
     def report_failure(self, account: PoolAccount, message: str, now: Optional[int] = None) -> None:
-        now = now if now is not None else int(time.time() * 1000)
-        account.failCount += 1
-        ms = min(COOLDOWN_MAX_MS, COOLDOWN_BASE_MS * 2 ** (account.failCount - 1))
-        account.cooldownUntil = now + ms
-        account.lastError = (message or "")[:200]
-        self._persist()
-        self._log(f"[cmdgo] 账号 {account.id} 请求失败（第 {account.failCount} 次），"
-                  f"冷却 {round(ms / 1000)}s：{account.lastError}")
+        with self._lock:
+            now = now if now is not None else int(time.time() * 1000)
+            # 距上次失败超过 FAIL_DECAY_MS 视为已恢复，冷却从基础值重新计。
+            if account.lastFailAt and now - account.lastFailAt > FAIL_DECAY_MS:
+                account.failCount = 0
+            account.failCount += 1
+            ms = min(COOLDOWN_MAX_MS, COOLDOWN_BASE_MS * 2 ** (account.failCount - 1))
+            account.cooldownUntil = now + ms
+            account.lastError = (message or "")[:200]
+            account.lastFailAt = now
+            self._persist()
+            self._log(f"[cmdgo] 账号 {account.id} 请求失败（第 {account.failCount} 次），"
+                      f"冷却 {round(ms / 1000)}s：{account.lastError}")
 
     def report_success(self, account: PoolAccount) -> None:
-        if account.failCount == 0 and account.cooldownUntil is None and account.lastError is None:
-            return
-        account.failCount = 0
-        account.cooldownUntil = None
-        account.lastError = None
-        self._persist()
+        with self._lock:
+            if account.failCount == 0 and account.cooldownUntil is None and account.lastError is None:
+                return
+            account.failCount = 0
+            account.cooldownUntil = None
+            account.lastError = None
+            account.lastFailAt = None
+            self._persist()
 
     # ---- 管理 ----
     def toggle(self, account_id: str, enabled: bool) -> bool:
         with self._lock:
+            self._ensure_loaded()
             account = self._find(account_id)
             if account is None or account.enabled == enabled:
                 return False
