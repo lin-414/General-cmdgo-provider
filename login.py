@@ -60,6 +60,7 @@ def _start_proxy_if_needed(port: int, base: str) -> bool:
 
     folder = _base_dir()
     provider_exe = os.path.join(folder, "cmdgo-provider.exe")
+    gui_exe = os.path.join(folder, "cmdgo-gui.exe")
     run_py = os.path.join(folder, "run.py")
     log_dir = os.path.join(folder, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -68,6 +69,9 @@ def _start_proxy_if_needed(port: int, base: str) -> bool:
     try:
         if os.path.isfile(provider_exe):
             command = [provider_exe, "--port", str(port)]
+        elif os.path.isfile(gui_exe):
+            # 新发行版只带 GUI 版 exe：GUI 启动后会自动拉起本地代理。
+            command = [gui_exe, "--port", str(port)]
         elif os.path.isfile(run_py) and not getattr(sys, "frozen", False):
             command = [sys.executable, run_py, "--port", str(port)]
         else:
@@ -141,7 +145,7 @@ def main():
         if st.get("status") == "success" and st.get("hasKey"):
             _info("登录成功！Go key 已缓存，现在可以直接在 Hermes Studio 里用了。")
             return
-        if st.get("status") == "error":
+        if st.get("status") in ("error", "cancelled"):
             _info("授权失败：" + st.get("message", "未知错误"))
             return
         time.sleep(1.5)

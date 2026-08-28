@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import io
 import json
 import logging
 import os
@@ -20,7 +19,6 @@ import threading
 import time
 import tkinter
 import urllib.request
-from contextlib import redirect_stdout
 
 # ---------------------------------------------------------------------------
 # 把 cmdgo_provider 的日志重定向到 GUI
@@ -165,7 +163,8 @@ class App(ctk.CTk):
             try:
                 fn(*args, **kwargs)
             except Exception:
-                pass
+                # 不能静默吞掉：回调里的 bug 会在这里消失得无影无踪。
+                logging.getLogger(__name__).exception("dispatch 回调执行失败")
         if self._dispatch_started:
             self.after(50, self._drain_dispatch)
 
@@ -272,8 +271,8 @@ class App(ctk.CTk):
                 data = json.loads(r.read())
             self._accounts = data.get("accounts", [])
         except Exception:
-            # 服务器未就绪时保持空列表
-            self._accounts = []
+            # 服务器未就绪/已停止：保留上次快照，避免账号面板每 5 秒闪烁清空。
+            pass
         finally:
             self._acct_refreshing = False
         # 线程安全投递到主循环执行（不可直接调用 self.after/set 控件）。
@@ -480,7 +479,7 @@ class App(ctk.CTk):
                 proxy.log("登录成功！Go key 已缓存")
                 self._dispatch(self._refresh_accounts)
                 break
-            if st.get("status") == "error":
+            if st.get("status") in ("error", "cancelled"):
                 proxy.log("授权失败: %s", st.get("message", "未知错误"))
                 break
             time.sleep(1.5)
