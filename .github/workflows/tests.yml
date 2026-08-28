@@ -13,8 +13,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile sources
-        run: python -m py_compile cmdgo_provider.py run.py login.py tests/test_mock.py tests/test_cached_auth.py
+        run: python -m py_compile cmdgo_provider.py run.py login.py tests/test_mock.py tests/test_cached_auth.py tests/test_failover.py
       - name: Run mock gateway test
         run: python tests/test_mock.py
       - name: Run cached auth test
         run: python tests/test_cached_auth.py
+      - name: Run pool unit tests
+        run: python tests/test_pool.py
+      - name: Run failover / error propagation test
+        run: python tests/test_failover.py

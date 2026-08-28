@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmdgo-provider"
-version = "0.1.0"
+version = "0.4.1"
 description = "Local OpenAI-compatible adapter for Command Code Go"
 requires-python = ">=3.10"
 dependencies = []
 [project.optional-dependencies]
-gui = ["pywebview>=4.0", "pystray>=0.19", "pillow>=9.0"]
+gui = ["pywebview>=4.0", "customtkinter>=5.2", "pystray>=0.19", "pillow>=9.0"]
 
 
 [tool.pytest.ini_options]
