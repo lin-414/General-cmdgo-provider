@@ -185,6 +185,18 @@ def gateway_error_message(body: str):
     return None
 
 
+def gateway_error_code(body: str):
+    try:
+        p = json.loads(body)
+        if isinstance(p, dict):
+            e = p.get("error")
+            if isinstance(e, dict) and isinstance(e.get("code"), str):
+                return e["code"]
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # OpenAI 请求 -> Command Code /alpha/generate 信封
 # ---------------------------------------------------------------------------
@@ -452,7 +464,11 @@ def refresh_models() -> None:
         for m in p["data"]:
             if isinstance(m, dict) and isinstance(m.get("id"), str) and is_go_model(m["id"]):
                 name = m["name"] if isinstance(m.get("name"), str) else m["id"].split("/")[-1]
-                models.append({"id": m["id"], "name": name})
+                entry = {"id": m["id"], "name": name}
+                # 透传上游的上下文窗口元数据，客户端（如 ZCode）可据此自动配置。
+                if isinstance(m.get("context_length"), int):
+                    entry["context_length"] = m["context_length"]
+                models.append(entry)
         models.sort(key=lambda x: x["id"])
         model_cache = {"models": models, "at": time.time()}
         log("synced %d Go models", len(models))
@@ -716,8 +732,13 @@ def sse(handler, obj) -> None:
 
 
 def handle_models(handler) -> None:
-    data = [{"id": m["id"], "object": "model", "created": 0,
-             "owned_by": "commandcode-go", "name": m["name"]} for m in model_cache["models"]]
+    data = []
+    for m in model_cache["models"]:
+        row = {"id": m["id"], "object": "model", "created": 0,
+               "owned_by": "commandcode-go", "name": m["name"]}
+        if isinstance(m.get("context_length"), int):
+            row["context_length"] = m["context_length"]
+        data.append(row)
     send_json(handler, 200, {"object": "list", "data": data})
 
 
@@ -796,6 +817,13 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
             # 网关把「模型不存在」也回 401；改写成 400，避免客户端误判为鉴权故障。
             if upstream.status == 401 and "not recognized" in msg.lower():
                 return "error", (400, msg, "invalid_request_error", False)
+            # 网关开始强制要求更新的 CLI 版本：换账号没有用，直接给出明确的处理指引。
+            if gateway_error_code(raw) == "upgrade_required":
+                log("上游要求更新 CLI 版本（upgrade_required）：当前伪装版本 %s，"
+                    "请设置环境变量 CC_VERSION 或 --cc-version 为更新的 CLI 版本后重启", CC_VERSION)
+                return "error", (502, f"Command Code gateway requires a newer CLI version (upgrade_required). "
+                                      f"Set the CC_VERSION env var (or --cc-version) to a newer CLI release and restart. "
+                                      f"Current: {CC_VERSION}", "server_error", False)
             if upstream.status in (401, 403):
                 st, et, retry = 401, "authentication_error", True
             elif upstream.status == 429:
@@ -1169,7 +1197,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if p == "/healthz":
             send_json(self, 200, {"ok": True, "service": "cmdgo-hermes-provider",
                                   "models": len(model_cache["models"]), "baseUrl": BASE_URL,
-                                  "accounts": pool.size})
+                                  "accounts": pool.size, "ccVersion": CC_VERSION})
             return
         if p == "/account/list":
             send_json(self, 200, {"ok": True, **pool_status()})
