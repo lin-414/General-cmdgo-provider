@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmdgo-provider"
-version = "0.4.2"
+version = "0.5.0"
 description = "Local OpenAI-compatible adapter for Command Code Go"
 requires-python = ">=3.10"
 dependencies = []
