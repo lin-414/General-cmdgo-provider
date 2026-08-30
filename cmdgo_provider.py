@@ -1273,13 +1273,15 @@ def start_server(block: bool = False):
         return _server
     _server = make_server()
     threading.Thread(target=model_refresh_loop, daemon=True).start()
+    # poll_interval 越短，shutdown() 的等待窗口越短（默认 0.5s），
+    # GUI 的「停止→立刻重启」就不容易撞上端口释放竞态。
     if block:
         log("listening on http://localhost:%s  (COMMANDCODE_BASE_URL=%s, CLI %s)", PORT, BASE_URL, CC_VERSION)
         if OVERRIDE_KEY:
             log("COMMANDCODE_API_KEY env set: incoming Authorization headers are ignored.")
-        _server.serve_forever()
+        _server.serve_forever(poll_interval=0.05)
     else:
-        threading.Thread(target=_server.serve_forever, daemon=True).start()
+        threading.Thread(target=_server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
         log("listening on http://localhost:%s (background)", PORT)
     return _server
 

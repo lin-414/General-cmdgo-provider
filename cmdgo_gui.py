@@ -400,11 +400,18 @@ class App(ctk.CTk):
         if self._running:
             return
         proxy.PORT = self.port
-        try:
-            self._server = proxy.start_server(block=False)
-        except OSError as e:
-            proxy.log("启动失败: %s", e)
-            return
+        # 停止是异步的（shutdown 最长约 50ms + server_close）；在竞态窗口内重试绑定，
+        # 快速「停止→启动」不再偶发端口占用。真端口冲突则 1 秒后照常报错。
+        self._server = None
+        for attempt in range(10):
+            try:
+                self._server = proxy.start_server(block=False)
+                break
+            except OSError as e:
+                if attempt == 9:
+                    proxy.log("启动失败: %s", e)
+                    return
+                time.sleep(0.1)
         self._running = True
         self._btn_proxy.configure(text="停止代理", fg_color="#f44336", hover_color="#c62828")
         self._lbl_status.configure(text="● 运行中", text_color="#4CAF50")
@@ -414,7 +421,15 @@ class App(ctk.CTk):
         if not self._running:
             return
         if self._server:
-            threading.Thread(target=self._server.shutdown, daemon=True).start()
+            server = self._server
+
+            def _shutdown():
+                # server_close 必须显式调用：否则监听 socket 要等 GC 才释放，
+                # Windows 上（已禁用 SO_REUSEADDR）停止后立刻重启会报端口占用。
+                server.shutdown()
+                server.server_close()
+
+            threading.Thread(target=_shutdown, daemon=True).start()
             self._server = None
         # 重置模块级 _server 变量以便重启
         proxy._server = None
