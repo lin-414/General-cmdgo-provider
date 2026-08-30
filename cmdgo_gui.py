@@ -161,14 +161,27 @@ class App(ctk.CTk):
             self.after(50, self._drain_dispatch)
 
     def _load_window_icon(self):
-        """窗口/任务栏图标：用托盘同款设计渲染一张 256px 的高清版本。"""
+        """窗口/任务栏图标：与托盘同款（绿色圆形 G）。
+
+        注意：customtkinter 会在初始化 200ms 后用自带的蓝色图标覆盖窗口图标
+        （_windows_set_titlebar_icon），除非用户调用过 iconbitmap()。iconphoto
+        不在其豁免名单里（会被覆盖成蓝色）——因此必须走 CTk 的 iconbitmap()。
+        """
         try:
-            from PIL import ImageTk
-            icon = ImageTk.PhotoImage(appicon.make_icon_image(size=256))
-            self.iconphoto(True, icon)
-            return icon
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            ico = os.path.join(base, "assets", "icon.ico")
+            if os.path.isfile(ico):
+                self.iconbitmap(ico)
+                return
         except Exception:
-            return None
+            pass
+        # 没有 .ico 时（理论不发生，assets 已随包打包）：标记已接管，再用动态渲染兜底
+        try:
+            self.iconbitmap()  # 置 _iconbitmap_method_called，阻断 CTk 的覆盖
+            from PIL import ImageTk
+            self.iconphoto(True, ImageTk.PhotoImage(appicon.make_icon_image(size=256)))
+        except Exception:
+            pass
 
     # ---- UI 构建 ----
     def _build_ui(self):
