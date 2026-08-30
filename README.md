@@ -77,14 +77,14 @@ API key:  cmdgo
 ### Run from source
 
 ```bash
-# GUI mode (native window, requires: pip install pywebview)
-python cmdgo_provider.py
+# Desktop GUI (native window + tray resident; requires: pip install customtkinter pystray pillow)
+python cmdgo_gui.py
 
-# Console-only mode
-python cmdgo_provider.py --no-gui
+# Console mode (web panel at http://127.0.0.1:8787/)
+python cmdgo_provider.py
 ```
 
-The default endpoint is `http://127.0.0.1:8787`. In GUI mode, a native window opens automatically showing the control panel.
+The default endpoint is `http://127.0.0.1:8787`. In GUI mode, a native window opens automatically showing the control panel; closing it minimizes to the tray.
 
 In another terminal, start OAuth login:
 
@@ -292,14 +292,14 @@ API Key: cmdgo
 ### 从源码运行
 
 ```bash
-# GUI 模式（原生窗口，需安装: pip install pywebview）
-python cmdgo_provider.py
+# 桌面 GUI（原生窗口 + 托盘常驻，需安装: pip install customtkinter pystray pillow）
+python cmdgo_gui.py
 
-# 仅控制台模式
-python cmdgo_provider.py --no-gui
+# 控制台模式（浏览器面板在 http://127.0.0.1:8787/）
+python cmdgo_provider.py
 ```
 
-默认地址：`http://127.0.0.1:8787`。GUI 模式会自动打开原生窗口显示控制面板。
+默认地址：`http://127.0.0.1:8787`。GUI 模式会自动打开原生窗口显示控制面板，关闭窗口即最小化到托盘。
 
 ### Hermes Studio 配置
 

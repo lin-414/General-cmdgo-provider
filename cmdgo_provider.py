@@ -1349,117 +1349,6 @@ def _run_login_flow(port: int) -> int:
     return 1
 
 
-def _run_gui():
-    """启动代理服务器 + 原生 GUI 窗口 + 系统托盘常驻。"""
-    try:
-        import webview
-    except ImportError:
-        log("pywebview 未安装，回退到控制台模式。安装: pip install pywebview")
-        start_server(block=True)
-        return
-
-    # 启动 HTTP 服务（后台线程）
-    start_server(block=False)
-    # 等待服务就绪
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/healthz", timeout=1) as r:
-                if r.status == 200:
-                    break
-        except Exception:
-            pass
-        time.sleep(0.3)
-    else:
-        log("错误：代理服务器启动超时，回退到控制台模式")
-        start_server(block=True)
-        return
-
-    html = _WEB_UI_HTML.replace("__PORT__", str(PORT))
-
-    # ---- 系统托盘 ----
-    _state = {"exit": False, "show": True}
-    _win = [None]                       # 当前窗口引用（可变容器供闭包使用）
-    _tray = [None]
-
-    try:
-        import pystray
-        from PIL import Image, ImageDraw
-
-        def _make_icon():
-            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            d.rounded_rectangle([2, 2, 62, 62], radius=10, fill="#3fb950")
-            d.rounded_rectangle([6, 6, 58, 58], radius=8, fill="#238636")
-            d.text((18, 10), "C", fill="#e6edf3")
-            return img
-
-        def _on_show(icon, item):
-            _state["show"] = True
-
-        def _on_exit(icon, item):
-            _state["exit"] = True
-            _state["show"] = True
-            w = _win[0]
-            if w:
-                try:
-                    w.destroy()
-                except Exception:
-                    pass
-            try:
-                icon.stop()
-            except Exception:
-                pass
-
-        _tray[0] = pystray.Icon(
-            "cmdgo-provider", _make_icon(), "cmdgo-provider",
-            menu=pystray.Menu(
-                pystray.MenuItem("显示窗口", _on_show, default=True),
-                pystray.MenuItem("退出", _on_exit),
-            ),
-        )
-        threading.Thread(target=_tray[0].run, daemon=True).start()
-        time.sleep(0.3)
-        log("系统托盘已就绪")
-    except ImportError:
-        log("pystray 未安装，无托盘支持（pip install pystray pillow）")
-
-    # ---- GUI 循环：窗口关闭 → 最小化到托盘；托盘双击 → 重新打开 ----
-    while not _state["exit"]:
-        _state["show"] = False
-        log("GUI 窗口已打开 (http://127.0.0.1:%s)", PORT)
-        w = webview.create_window(
-            f"cmdgo-provider  ·  localhost:{PORT}",
-            html=html,
-            width=960,
-            height=720,
-            min_size=(640, 480),
-            text_select=True,
-        )
-        _win[0] = w
-        webview.start(debug=False)
-        _win[0] = None
-
-        if _state["exit"]:
-            break
-
-        if _tray[0]:
-            log("窗口已最小化到系统托盘")
-            while not _state["show"] and not _state["exit"]:
-                time.sleep(0.3)
-        else:
-            # 无托盘：窗口关闭即退出
-            break
-
-    # 清理
-    if _tray[0]:
-        try:
-            _tray[0].stop()
-        except Exception:
-            pass
-    log("已退出")
-
-
 def main():
     global PORT, BASE_URL, OVERRIDE_KEY, CC_VERSION
     ap = argparse.ArgumentParser(description="CommandCode Go -> OpenAI 兼容代理 (纯 Python)")
@@ -1469,7 +1358,7 @@ def main():
     ap.add_argument("--cc-version", default=CC_VERSION)
     ap.add_argument("--login", action="store_true", help="启动代理并完成 OAuth 登录后退出")
     ap.add_argument("--keep-alive", action="store_true", help="与 --login 搭配：登录成功后保持代理运行")
-    ap.add_argument("--no-gui", action="store_true", help="仅控制台模式，不打开 GUI 窗口")
+    ap.add_argument("--no-gui", action="store_true", help="(兼容参数，忽略) 控制台模式；桌面入口是 cmdgo_gui.py")
     args = ap.parse_args()
     PORT = args.port
     BASE_URL = args.base_url.rstrip("/")
@@ -1492,10 +1381,9 @@ def main():
             log("收到中断信号，退出")
             return
 
-    if args.no_gui:
-        start_server(block=True)
-    else:
-        _run_gui()
+    # GUI 收敛后 cmdgo_provider.py 只做控制台模式（浏览器面板仍在 http://127.0.0.1:PORT/）。
+    # --no-gui 保留为兼容参数：windows/start_proxy.vbs 等脚本仍在传。
+    start_server(block=True)
 
 
 if __name__ == "__main__":
