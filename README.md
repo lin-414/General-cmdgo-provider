@@ -129,6 +129,22 @@ Windows PowerShell:
 
 Restart the terminal before starting Codex. This adapter implements Chat Completions, not the Responses API.
 
+### ZCode
+
+In ZCode's provider settings, add a **custom provider**:
+
+| Item | Value |
+|------|-------|
+| Protocol | OpenAI-compatible (Chat Completions) — **not** Anthropic |
+| Base URL | `http://127.0.0.1:8787/v1` |
+| API key | `cmdgo` (placeholder) |
+| Model | an exact id copied from `http://127.0.0.1:8787/v1/models`, e.g. `zai-org/GLM-5.3` |
+
+> The model id must match `/v1/models` exactly. The gateway rejects unknown ids
+> with `401 "Model/provider not recognized"` (the adapter rewrites it to 400).
+> If your client reports "authentication failed", check the model id first —
+> the credentials are almost certainly fine.
+
 ### VS Code extensions
 
 VS Code itself has no universal OpenAI provider setting. Extensions that support custom OpenAI-compatible providers can use:
@@ -317,6 +333,21 @@ Windows PowerShell：
 ```
 
 重新打开终端后再启动 Codex。本适配器实现 Chat Completions，不实现 Responses API。
+
+### ZCode 配置
+
+在 ZCode 的供应商设置里添加**自定义供应商**：
+
+| 项 | 值 |
+|----|-----|
+| 协议 | OpenAI 兼容（Chat Completions）——**不要**选 Anthropic |
+| Base URL | `http://127.0.0.1:8787/v1` |
+| API Key | `cmdgo`（占位符） |
+| 模型 | 从 `http://127.0.0.1:8787/v1/models` 原样抄，例如 `zai-org/GLM-5.3` |
+
+> 模型 ID 必须与 `/v1/models` 完全一致。网关对未知模型回 `401 "Model/provider
+> not recognized"`（适配器会改写为 400）。客户端报「鉴权失败」时先检查模型 ID——
+> 凭据本身几乎不会有问题。
 
 ### VS Code 扩展
 
