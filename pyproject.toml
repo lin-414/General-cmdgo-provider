@@ -14,3 +14,15 @@ gui = ["customtkinter>=5.2", "pystray>=0.19", "pillow>=9.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 200
+
+[tool.ruff.lint]
+# 保持接近 pyflakes 的窄集：真实错误（未用变量/未定义名/未用导入/语法级问题）。
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试文件允许紧凑风格和故意未用的导入（隔离模块实例时需要）。
+"tests/*" = ["F841"]

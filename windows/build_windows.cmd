@@ -5,7 +5,7 @@ cd /d "%~dp0.."
 where pyinstaller >nul 2>nul
 if errorlevel 1 (
   echo PyInstaller was not found.
-  echo Install it with: python -m pip install pyinstaller pywebview pystray pillow
+  echo Install it with: python -m pip install pyinstaller customtkinter pystray pillow
   exit /b 1
 )
 

@@ -55,8 +55,8 @@ import cmdgo_provider as proxy  # noqa: E402
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
-import customtkinter as ctk
-from PIL import Image, ImageDraw
+import customtkinter as ctk  # noqa: E402  # 必须在日志配置之后导入
+from PIL import Image, ImageDraw  # noqa: E402
 
 # 主题
 ctk.set_appearance_mode("dark")

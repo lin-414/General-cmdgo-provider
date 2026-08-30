@@ -39,7 +39,6 @@ HTTP 接口（与 OpenAI 兼容，可直接填进 Hermes Studio 的「自定义 
 from __future__ import annotations
 
 import argparse
-import base64
 import datetime
 import http.client
 import json
@@ -82,7 +81,7 @@ log = logging.getLogger("cmdgo-provider").info
 _HERE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _HERE_DIR not in sys.path:
     sys.path.insert(0, _HERE_DIR)
-from pool import AccountPool, POOL_FILE, data_dir as _data_dir  # noqa: E402
+from pool import AccountPool, data_dir as _data_dir  # noqa: E402
 import credstore  # noqa: E402
 
 

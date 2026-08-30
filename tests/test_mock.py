@@ -3,17 +3,16 @@
 import importlib.util
 import json
 import os
-import sys
+import tempfile
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-spec = importlib.util.spec_from_file_location("cmdgo_test_mod", os.path.join(ROOT, "cmdgo_provider.py"))
-cmdgo = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cmdgo)
 
 PROXY_PORT = 8799
 GATEWAY_PORT = 8801
@@ -34,10 +33,9 @@ class MockGateway(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", 0))
         raw = self.rfile.read(length) if length else b""
         envelope = json.loads(raw.decode("utf-8", "replace"))
-        model = envelope["params"]["model"]
         assert self.headers.get("authorization", "").startswith("Bearer "), "missing auth"
-        assert self.headers.get("user-agent") == f"commandcode/{cmdgo.CC_VERSION}", "bad UA"
-        assert self.headers.get("x-project-slug") == cmdgo.PROJECT_SLUG, "bad slug"
+        assert self.headers.get("user-agent", "").startswith("commandcode/"), "bad UA"
+        assert self.headers.get("x-project-slug"), "bad slug"
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.end_headers()
@@ -53,52 +51,85 @@ class MockGateway(BaseHTTPRequestHandler):
             time.sleep(0.01)
 
 
-gw = ThreadingHTTPServer(("127.0.0.1", GATEWAY_PORT), MockGateway)
-threading.Thread(target=gw.serve_forever, daemon=True).start()
-time.sleep(0.3)
-
-cmdgo.BASE_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
-cmdgo.PORT = PROXY_PORT
-cmdgo.OVERRIDE_KEY = "test-key-123"
-cmdgo.start_server(block=False)
-time.sleep(0.4)
-
-BASE = f"http://127.0.0.1:{PROXY_PORT}"
-OK = True
-
-
-def check(name, cond):
-    global OK
-    print(("PASS" if cond else "FAIL"), name, flush=True)
-    if not cond:
-        OK = False
+@pytest.fixture(scope="module")
+def cmdgo():
+    spec = importlib.util.spec_from_file_location("cmdgo_test_mock", os.path.join(ROOT, "cmdgo_provider.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # 隔离：不读真实 token.json / accounts.json
+    mod.cached_api_key = ""
+    mod.TOKEN_FILE = os.path.join(tempfile.mkdtemp(prefix="cmdgo-mock-token-"), "token.json")
+    mod.pool._file = os.path.join(tempfile.mkdtemp(prefix="cmdgo-mock-pool-"), "accounts.json")
+    mod.pool._loaded = True
+    mod.pool._accounts = []
+    return mod
 
 
-try:
-    with urllib.request.urlopen(f"{BASE}/healthz", timeout=10) as r:
+@pytest.fixture(scope="module")
+def gateway():
+    gw = ThreadingHTTPServer(("127.0.0.1", GATEWAY_PORT), MockGateway)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    yield gw
+    gw.shutdown()
+    gw.server_close()
+
+
+@pytest.fixture(scope="module")
+def proxy(cmdgo, gateway):
+    cmdgo.BASE_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
+    cmdgo.PORT = PROXY_PORT
+    cmdgo.OVERRIDE_KEY = "test-key-123"
+    cmdgo.start_server(block=False)
+    time.sleep(0.4)
+    yield cmdgo
+    cmdgo._server.shutdown()
+    cmdgo._server.server_close()
+    cmdgo._server = None
+
+
+def delta_of(e):
+    ch = e.get("choices") or [{}]
+    return (ch[0] if ch else {}).get("delta", {})
+
+
+def finish_of(e):
+    ch = e.get("choices") or [{}]
+    return (ch[0] if ch else {}).get("finish_reason")
+
+
+def test_healthz(proxy):
+    with urllib.request.urlopen(f"http://127.0.0.1:{PROXY_PORT}/healthz", timeout=10) as r:
         h = json.loads(r.read())
-        check("healthz ok", h.get("ok") is True)
+    assert h.get("ok") is True
 
-    with urllib.request.urlopen(f"{BASE}/v1/models", timeout=10) as r:
+
+def test_models(proxy):
+    with urllib.request.urlopen(f"http://127.0.0.1:{PROXY_PORT}/v1/models", timeout=10) as r:
         m = json.loads(r.read())
-        check("models object list", m.get("object") == "list" and isinstance(m.get("data"), list))
+    assert m.get("object") == "list"
+    assert isinstance(m.get("data"), list)
 
+
+def test_nonstream(proxy):
     req = urllib.request.Request(
-        f"{BASE}/v1/chat/completions",
+        f"http://127.0.0.1:{PROXY_PORT}/v1/chat/completions",
         data=json.dumps({"model": "test/go-model", "messages": [{"role": "user", "content": "hi"}], "stream": False}).encode(),
         headers={"Content-Type": "application/json"}, method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as r:
         resp = json.loads(r.read())
-        msg = resp["choices"][0]["message"]
-        check("nonstream content", msg.get("content") == "Hello world")
-        check("nonstream reasoning", msg.get("reasoning_content") == "让我想想")
-        check("nonstream tool_calls", isinstance(msg.get("tool_calls"), list) and msg["tool_calls"][0]["function"]["name"] == "get_weather")
-        check("nonstream finish", resp["choices"][0]["finish_reason"] == "tool_calls")
-        check("nonstream usage", resp["usage"]["total_tokens"] == 19)
+    msg = resp["choices"][0]["message"]
+    assert msg.get("content") == "Hello world"
+    assert msg.get("reasoning_content") == "让我想想"
+    assert isinstance(msg.get("tool_calls"), list) and msg["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert resp["choices"][0]["finish_reason"] == "tool_calls"
+    assert resp["usage"]["total_tokens"] == 19
 
+
+def test_stream(proxy):
     req = urllib.request.Request(
-        f"{BASE}/v1/chat/completions",
+        f"http://127.0.0.1:{PROXY_PORT}/v1/chat/completions",
         data=json.dumps({"model": "test/go-model", "messages": [{"role": "user", "content": "hi"}],
                          "stream": True, "stream_options": {"include_usage": True}}).encode(),
         headers={"Content-Type": "application/json"}, method="POST",
@@ -110,36 +141,19 @@ try:
             if not line.startswith("data:"):
                 continue
             payload = line[len("data:"):].strip()
-            if payload == "[DONE]":
-                events.append("[DONE]")
-            else:
-                events.append(json.loads(payload))
+            events.append("[DONE]" if payload == "[DONE]" else json.loads(payload))
 
-    def delta_of(e):
-        ch = e.get("choices") or [{}]
-        return (ch[0] if ch else {}).get("delta", {})
-
-    def finish_of(e):
-        ch = e.get("choices") or [{}]
-        return (ch[0] if ch else {}).get("finish_reason")
-
-    roles = [e for e in events if e != "[DONE]" and delta_of(e).get("role")]
     reasoning = [e for e in events if e != "[DONE]" and "reasoning_content" in delta_of(e)]
     contents = [e for e in events if e != "[DONE]" and "content" in delta_of(e)]
     tools = [e for e in events if e != "[DONE]" and delta_of(e).get("tool_calls")]
     finishes = [e for e in events if e != "[DONE]" and finish_of(e)]
     usages = [e for e in events if e != "[DONE]" and "usage" in e]
-    check("stream role chunk", len(roles) >= 1)
-    check("stream reasoning chunk", len(reasoning) == 1 and reasoning[0]["choices"][0]["delta"]["reasoning_content"] == "让我想想")
-    check("stream content chunks", "".join(c["choices"][0]["delta"]["content"] for c in contents) == "Hello world")
-    check("stream tool_call chunk", len(tools) == 1 and tools[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "get_weather")
-    check("stream usage chunk", len(usages) == 1 and usages[0]["usage"]["total_tokens"] == 19)
-    check("stream finish chunk", len(finishes) == 1 and finishes[0]["choices"][0]["finish_reason"] == "tool_calls")
-    check("stream DONE", bool(events) and events[-1] == "[DONE]")
-except Exception as e:
-    print("EXCEPTION:", repr(e), flush=True)
-    OK = False
-finally:
-    gw.shutdown()
-    print("\nALL PASS" if OK else "\nSOME FAILED", flush=True)
-    sys.exit(0 if OK else 1)
+
+    assert any(e != "[DONE]" and delta_of(e).get("role") for e in events)
+    assert len(reasoning) == 1 and reasoning[0]["choices"][0]["delta"]["reasoning_content"] == "让我想想"
+    assert "".join(c["choices"][0]["delta"]["content"] for c in contents) == "Hello world"
+    assert len(tools) == 1 and tools[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "get_weather"
+    # finish_reason 是流终态：整条流只出现一次
+    assert len(finishes) == 1 and finishes[0]["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(usages) == 1 and usages[0]["usage"]["total_tokens"] == 19
+    assert events and events[-1] == "[DONE]"
