@@ -956,7 +956,7 @@ _WEB_UI_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>cmdgo-provider</title>
+<title>General-cmdgo-provider</title>
 <script>const API='http://127.0.0.1:__PORT__';</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1000,7 +1000,7 @@ footer{text-align:center;color:var(--dim);font-size:12px;margin-top:32px;padding
 <body>
 <div class="container">
   <header>
-    <h1>cmdgo-provider</h1>
+    <h1>General-cmdgo-provider</h1>
     <span id="badge" class="badge err"><span class="dot off"></span>已停止</span>
   </header>
 
@@ -1037,7 +1037,7 @@ footer{text-align:center;color:var(--dim);font-size:12px;margin-top:32px;padding
     <div id="log"></div>
   </div>
 
-  <footer>cmdgo-provider · 非官方 Command Code Go 适配器</footer>
+  <footer>General-cmdgo-provider · 非官方 Command Code Go 适配器</footer>
 </div>
 
 <script>

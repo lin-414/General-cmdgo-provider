@@ -35,7 +35,7 @@ def _info(msg: str):
     print(msg)
     if _HAS_TK:
         try:
-            _mb.showinfo("cmdgo-provider 登录", msg)
+            _mb.showinfo("General-cmdgo-provider 登录", msg)
         except Exception:
             pass
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cmdgo-provider 图形界面 — 现代深色主题 + 系统托盘常驻。
+General-cmdgo-provider 图形界面 — 现代深色主题 + 系统托盘常驻。
 
 用法：
   python cmdgo_gui.py
@@ -51,12 +51,12 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import cmdgo_provider as proxy  # noqa: E402
+import appicon  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
 import customtkinter as ctk  # noqa: E402  # 必须在日志配置之后导入
-from PIL import Image, ImageDraw  # noqa: E402
 
 # 主题
 ctk.set_appearance_mode("dark")
@@ -76,16 +76,9 @@ def _system_font_family(root=None) -> str:
     except Exception:
         return "Segoe UI"
 
-# 托盘图标（简单圆形）
-def _make_tray_icon(color: str = "#4CAF50", size: int = 64) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    margin = 4
-    draw.ellipse([margin, margin, size - margin, size - margin], fill=color)
-    # 画一个简化的 "G"
-    draw.arc([size * 0.25, size * 0.2, size * 0.75, size * 0.8],
-             start=30, end=320, fill="white", width=max(size // 10, 3))
-    return img
+def _make_tray_icon(color: str = appicon.BASE_COLOR, size: int = 64):
+    """托盘图标 — 设计统一收敛到 appicon.py（与窗口/任务栏/EXE 图标同源）。"""
+    return appicon.make_icon_image(color, size)
 
 
 class App(ctk.CTk):
@@ -112,13 +105,12 @@ class App(ctk.CTk):
         self._dispatch_started = False
 
         # 窗口设置
-        self.title("cmdgo-provider")
+        self.title("General-cmdgo-provider")
         self.geometry("560x560")
         self.minsize(460, 420)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # 设置窗口图标（优先使用打包的 .ico，回退到程序生成的圆形图标）
-        self._icon_img = _make_tray_icon()
+        # 窗口/任务栏图标与托盘同款（绿色圆形 G），不再使用 assets/icon.ico 旧设计
         self._tk_icon = self._load_window_icon()
 
         self._build_ui()
@@ -169,18 +161,14 @@ class App(ctk.CTk):
             self.after(50, self._drain_dispatch)
 
     def _load_window_icon(self):
-        """尝试加载打包的 assets/icon.ico 作为窗口图标，失败则回退到内置圆形图标。"""
+        """窗口/任务栏图标：用托盘同款设计渲染一张 256px 的高清版本。"""
         try:
-            import tkinter as _tk
-            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-            ico = os.path.join(base, "assets", "icon.ico")
-            if os.path.isfile(ico):
-                img = _tk.PhotoImage(master=self, file=ico)
-                self.iconphoto(True, img)
-                return img
+            from PIL import ImageTk
+            icon = ImageTk.PhotoImage(appicon.make_icon_image(size=256))
+            self.iconphoto(True, icon)
+            return icon
         except Exception:
-            pass
-        return ctk.CTkImage(self._icon_img, size=(32, 32))
+            return None
 
     # ---- UI 构建 ----
     def _build_ui(self):
@@ -547,7 +535,7 @@ class App(ctk.CTk):
         color = "#4CAF50" if self._running else "#f44336"
         self._tray_icon = pystray.Icon(
             "cmdgo-provider", _make_tray_icon(color),
-            "cmdgo-provider", menu,
+            "General-cmdgo-provider", menu,
         )
         self._tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
         self._tray_thread.start()

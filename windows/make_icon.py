@@ -1,28 +1,18 @@
 #!/usr/bin/env python3
-"""Generate a modern app icon (.ico + .png) for cmdgo-provider."""
-from PIL import Image, ImageDraw, ImageFont
-
+"""Generate the app icon (.ico + .png) — same design as the tray icon (see appicon.py)."""
 import os
-OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+import sys
 
-SIZE = 256
-img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-d = ImageDraw.Draw(img)
+from PIL import Image  # noqa: F401  (re-exported for callers that inspect assets)
 
-# Rounded-square green "tile"
-d.rounded_rectangle([16, 16, SIZE - 16, SIZE - 16], radius=52, fill="#238636")
-d.rounded_rectangle([30, 30, SIZE - 30, SIZE - 30], radius=42, fill="#3fb950")
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
 
-# Letter "G" (Command Code Go) centered
-try:
-    font = ImageFont.truetype("arialbd.ttf", 150)
-except Exception:
-    font = ImageFont.load_default(size=150)
-bbox = d.textbbox((0, 0), "G", font=font)
-w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-d.text(((SIZE - w) / 2 - bbox[0], (SIZE - h) / 2 - bbox[1]), "G", font=font, fill="#ffffff")
+import appicon  # noqa: E402  # 需先把项目根目录加入 sys.path
 
+OUT = os.path.join(ROOT, "assets")
+img = appicon.make_icon_image(size=256)
 img.save(OUT + "/icon.png")
-# Square sizes for .ico
 img.save(OUT + "/icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 print("icon written to", OUT)
