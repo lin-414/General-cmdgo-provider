@@ -83,6 +83,7 @@ _HERE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _HERE_DIR not in sys.path:
     sys.path.insert(0, _HERE_DIR)
 from pool import AccountPool, POOL_FILE, data_dir as _data_dir  # noqa: E402
+import credstore  # noqa: E402
 
 
 TOKEN_FILE = os.path.join(_data_dir(), "token.json")
@@ -92,20 +93,20 @@ cached_api_key = ""
 def _load_cached_key() -> None:
     global cached_api_key
     try:
-        with open(TOKEN_FILE, encoding="utf-8") as f:
-            d = json.load(f)
+        d = json.loads(credstore.read_credential(TOKEN_FILE))
         k = d.get("apiKey")
         if isinstance(k, str) and k:
             cached_api_key = k
             log("已从 %s 载入缓存的 apiKey", TOKEN_FILE)
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception as e:
+        log("读取缓存 apiKey 失败: %s", e)
 
 
 def _save_cached_key(key: str) -> None:
     try:
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            json.dump({"apiKey": key}, f)
+        credstore.write_credential(TOKEN_FILE, json.dumps({"apiKey": key}).encode("utf-8"))
     except Exception as e:
         log("无法持久化 apiKey: %s", e)
 

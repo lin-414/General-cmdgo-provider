@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Optional
 
+import credstore
+
 # 首次失败的冷却时长；连续失败按指数翻倍。
 COOLDOWN_BASE_MS = 30_000
 # 指数冷却上限。
@@ -149,27 +151,25 @@ class AccountPool:
             return
         self._loaded = True
         try:
-            with open(self.file, encoding="utf-8") as f:
-                parsed = json.load(f)
+            parsed = json.loads(credstore.read_credential(self.file))
             acc = parsed.get("accounts")
             if isinstance(acc, list):
                 self._accounts = [
                     PoolAccount.from_dict(a) for a in acc
                     if isinstance(a, dict) and isinstance(a.get("id"), str) and isinstance(a.get("apiKey"), str)
                 ]
-        except Exception:
+        except FileNotFoundError:
             self._accounts = []
+        except Exception as e:
+            # 坏文件 / 其他用户的 DPAPI 密文：不静默清空覆盖，先报出来。
+            self._accounts = []
+            self._log(f"[cmdgo] 账号清单读取失败（保持空池，不会覆盖原文件）：{e}")
 
     def _persist(self) -> None:
         payload = json.dumps({"version": 1, "accounts": [a.to_dict() for a in self._accounts]},
                              ensure_ascii=False, indent=2)
         try:
-            d = os.path.dirname(self.file)
-            os.makedirs(d, exist_ok=True)
-            tmp = f"{self.file}.{random.randbytes(4).hex()}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(payload)
-            os.replace(tmp, self.file)
+            credstore.write_credential(self.file, payload.encode("utf-8"))
         except Exception as e:
             self._log(f"[cmdgo] 账号清单写入失败（不影响本次会话）：{e}")
 
@@ -217,13 +217,14 @@ class AccountPool:
             if self._accounts:
                 return
             try:
-                with open(os.path.join(_data_dir(), "token.json"), encoding="utf-8") as f:
-                    d = json.load(f)
-                legacy = d.get("apiKey")
+                parsed = json.loads(credstore.read_credential(os.path.join(_data_dir(), "token.json")))
+                legacy = parsed.get("apiKey")
                 if isinstance(legacy, str) and legacy:
                     self._accounts.append(PoolAccount(id="default", apiKey=legacy, addedAt=int(time.time() * 1000)))
                     self._persist()
                     self._log("[cmdgo] 已将既有凭据收编为账号池 #1（default）")
+            except FileNotFoundError:
+                return
             except Exception:
                 return
 

@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pool
+import credstore
 
 
 class AccountPoolTest(unittest.TestCase):
@@ -113,6 +114,55 @@ class AccountPoolTest(unittest.TestCase):
             pool._data_dir = orig_data_dir
         self.assertEqual(alt.size, 1)
         self.assertEqual(alt.list()[0].id, "default")
+
+
+class CredentialStoreTest(unittest.TestCase):
+    """DPAPI 凭据加密：Windows 走真实 DPAPI（同用户可解），其他平台明文回退。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cmdgo-cred-test-")
+
+    def test_roundtrip(self):
+        data = b'{"apiKey": "secret-key-xyz"}'
+        enc = credstore.protect(data)
+        if os.name == "nt":
+            self.assertTrue(enc.startswith(credstore.MAGIC))
+        self.assertEqual(credstore.unprotect(enc), data)
+
+    def test_plaintext_passthrough(self):
+        # 无 MAGIC 前缀 = 旧版明文文件，读取时原样返回
+        data = b'{"apiKey": "legacy"}'
+        self.assertEqual(credstore.unprotect(data), data)
+
+    def test_write_read_credential(self):
+        path = os.path.join(self.tmp, "cred.json")
+        credstore.write_credential(path, b'{"apiKey": "abc"}')
+        with open(path, "rb") as f:
+            raw = f.read()
+        if os.name == "nt":
+            self.assertTrue(raw.startswith(credstore.MAGIC))
+        self.assertEqual(credstore.read_credential(path), b'{"apiKey": "abc"}')
+
+
+class PoolEncryptionTest(unittest.TestCase):
+    """账号清单落盘应加密（Windows），且读取端无感。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cmdgo-pool-enc-test-")
+        self.file = os.path.join(self.tmp, "accounts.json")
+
+    def test_manifest_encrypted_at_rest(self):
+        p = pool.AccountPool("cmdgo", log=lambda m: None, file=self.file)
+        p.add({"apiKey": "k1-secret", "userName": "alice"})
+        with open(self.file, "rb") as f:
+            raw = f.read()
+        if os.name == "nt":
+            self.assertTrue(raw.startswith(credstore.MAGIC))
+            self.assertNotIn(b"k1-secret", raw)  # 明文 key 不落在磁盘上
+        # 读取端走同一套解密逻辑，对调用方透明
+        p2 = pool.AccountPool("cmdgo", log=lambda m: None, file=self.file)
+        self.assertEqual(p2.size, 1)
+        self.assertEqual(p2.list()[0].apiKey, "k1-secret")
 
 
 if __name__ == "__main__":
