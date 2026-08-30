@@ -302,6 +302,21 @@ class App(ctk.CTk):
             lbl = ctk.CTkLabel(row, text=f"{status} {name}",
                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color=color)
             lbl.pack(side="left", padx=(10, 4), pady=6)
+            # 用量统计（累计）：成功/失败次数 + token 总量
+            stats = []
+            if acc.get("okCount"):
+                stats.append(f"成功 {acc['okCount']}")
+            if acc.get("errCount"):
+                stats.append(f"失败 {acc['errCount']}")
+            tok = (acc.get("tokensIn") or 0) + (acc.get("tokensOut") or 0)
+            if tok:
+                stats.append(f"{tok / 1000:.1f}k tokens" if tok >= 1000 else f"{tok} tokens")
+            if stats:
+                lbl_stats = ctk.CTkLabel(row, text=" · ".join(stats),
+                                         font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                         text_color="#666")
+                lbl_stats.pack(side="left", padx=(0, 4), pady=6)
+                self._acct_row_widgets.append(lbl_stats)
             # 小按钮：启用/禁用 + 删除
             a_id = acc.get("id", "")
             btn_toggle = ctk.CTkButton(row, text="停用" if acc.get("enabled") else "启用", width=52, height=24,

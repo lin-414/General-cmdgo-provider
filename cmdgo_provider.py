@@ -373,15 +373,14 @@ def event_to_openai(event: dict, state: dict):
         state["toolIdx"] += 1
     elif t == "finish-step":
         usage = event.get("usage")
-        if isinstance(usage, dict) and state.get("wantUsage"):
-            out.append({
-                "choices": [],
-                "usage": {
-                    "prompt_tokens": usage.get("inputTokens", 0),
-                    "completion_tokens": usage.get("outputTokens", 0),
-                    "total_tokens": usage.get("inputTokens", 0) + usage.get("outputTokens", 0),
-                },
-            })
+        if isinstance(usage, dict):
+            state["lastUsage"] = {
+                "prompt_tokens": usage.get("inputTokens", 0),
+                "completion_tokens": usage.get("outputTokens", 0),
+                "total_tokens": usage.get("inputTokens", 0) + usage.get("outputTokens", 0),
+            }
+            if state.get("wantUsage"):
+                out.append({"choices": [], "usage": state["lastUsage"]})
         # finish_reason 暂存在 state 里，由 handle_chat 在整条流结束时统一发一次。
         # 多步工具流会送来多个 finish-step，而 OpenAI 协议里 finish_reason 是终态，
         # 中间步骤就发出去会让部分客户端提前收尾、丢掉后续步骤的内容。
@@ -848,7 +847,8 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
                 return "error", (502, str(e), "api_error", True)
             send_json(handler, 200, resp)
             if account is not None:
-                pool.report_success(account)
+                u = resp.get("usage")
+                pool.report_success(account, usage=u if isinstance(u, dict) else None)
             return "ok", None
 
         # streaming
@@ -869,7 +869,7 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
                 if state.get("sawError"):
                     pool.report_failure(account, f"upstream error event: {state.get('errorMessage', '')}")
                 else:
-                    pool.report_success(account)
+                    pool.report_success(account, usage=state.get("lastUsage"))
             if not state.get("sawError"):
                 # finish_reason 只在此刻发一次（中间步骤的已暂存丢弃）。
                 sse(handler, {"choices": [{"index": 0, "delta": {}, "finish_reason": state.get("finishReason", "stop")}]})

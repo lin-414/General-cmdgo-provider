@@ -98,6 +98,33 @@ class AccountPoolTest(unittest.TestCase):
     def test_pick_returns_none_when_empty(self):
         self.assertIsNone(self.p.pick())
 
+    def test_usage_stats_accumulate(self):
+        a = self._add("k1", "alice")
+        self.p.report_success(a, usage={"prompt_tokens": 100, "completion_tokens": 30})
+        self.p.report_success(a, usage={"prompt_tokens": 10, "completion_tokens": 5})
+        self.p.report_failure(a, "upstream 429")
+        self.assertEqual(a.okCount, 2)
+        self.assertEqual(a.errCount, 1)
+        self.assertEqual(a.tokensIn, 110)
+        self.assertEqual(a.tokensOut, 35)
+        # 成功同时清掉冷却状态
+        self.assertEqual(a.failCount, 1)  # 刚失败过一次
+        self.p.report_success(a)
+        self.assertEqual(a.failCount, 0)
+        self.assertIsNone(a.cooldownUntil)
+
+    def test_usage_stats_persist_and_describe(self):
+        a = self._add("k1", "alice")
+        self.p.report_success(a, usage={"prompt_tokens": 1234, "completion_tokens": 567})
+        p2 = pool.AccountPool("cmdgo", log=lambda m: None, file=self.file)
+        b = p2.list()[0]
+        self.assertEqual(b.okCount, 1)
+        self.assertEqual(b.tokensIn, 1234)
+        row = p2.describe_all()[0]
+        self.assertEqual(row["okCount"], 1)
+        self.assertEqual(row["errCount"], 0)
+        self.assertEqual(row["tokensOut"], 567)
+
     def test_adopt_legacy(self):
         # 模拟旧 token.json 存在
         data_dir = os.path.join(self.tmp, "data")

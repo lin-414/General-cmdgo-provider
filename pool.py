@@ -54,7 +54,9 @@ class PoolAccount:
                  keyName: Optional[str] = None, addedAt: Optional[int] = None,
                  enabled: bool = True, failCount: int = 0,
                  cooldownUntil: Optional[int] = None, lastError: Optional[str] = None,
-                 lastUsedAt: Optional[int] = None, lastFailAt: Optional[int] = None) -> None:
+                 lastUsedAt: Optional[int] = None, lastFailAt: Optional[int] = None,
+                 okCount: int = 0, errCount: int = 0,
+                 tokensIn: int = 0, tokensOut: int = 0) -> None:
         self.id = id
         self.apiKey = apiKey
         self.userName = userName
@@ -66,6 +68,11 @@ class PoolAccount:
         self.lastError = lastError
         self.lastUsedAt = lastUsedAt
         self.lastFailAt = lastFailAt
+        # 累计用量统计（跨会话持久化）：成功/失败请求数与 token 数。
+        self.okCount = okCount
+        self.errCount = errCount
+        self.tokensIn = tokensIn
+        self.tokensOut = tokensOut
 
     def to_dict(self) -> dict:
         """序列化为 manifest 行（不对外暴露 API key 明文的查看接口除外，这里完整落地）。"""
@@ -75,6 +82,10 @@ class PoolAccount:
             "addedAt": self.addedAt,
             "enabled": self.enabled,
             "failCount": self.failCount,
+            "okCount": self.okCount,
+            "errCount": self.errCount,
+            "tokensIn": self.tokensIn,
+            "tokensOut": self.tokensOut,
         }
         if self.userName is not None:
             d["userName"] = self.userName
@@ -119,6 +130,10 @@ class PoolAccount:
             lastError=d.get("lastError"),
             lastUsedAt=d.get("lastUsedAt"),
             lastFailAt=d.get("lastFailAt"),
+            okCount=d.get("okCount", 0),
+            errCount=d.get("errCount", 0),
+            tokensIn=d.get("tokensIn", 0),
+            tokensOut=d.get("tokensOut", 0),
         )
 
 
@@ -273,6 +288,7 @@ class AccountPool:
             if account.lastFailAt and now - account.lastFailAt > FAIL_DECAY_MS:
                 account.failCount = 0
             account.failCount += 1
+            account.errCount += 1
             ms = min(COOLDOWN_MAX_MS, COOLDOWN_BASE_MS * 2 ** (account.failCount - 1))
             account.cooldownUntil = now + ms
             account.lastError = (message or "")[:200]
@@ -281,9 +297,14 @@ class AccountPool:
             self._log(f"[cmdgo] 账号 {account.id} 请求失败（第 {account.failCount} 次），"
                       f"冷却 {round(ms / 1000)}s：{account.lastError}")
 
-    def report_success(self, account: PoolAccount) -> None:
+    def report_success(self, account: PoolAccount, usage: Optional[dict] = None) -> None:
         with self._lock:
+            account.okCount += 1
+            if isinstance(usage, dict):
+                account.tokensIn += int(usage.get("prompt_tokens", 0) or 0)
+                account.tokensOut += int(usage.get("completion_tokens", 0) or 0)
             if account.failCount == 0 and account.cooldownUntil is None and account.lastError is None:
+                self._persist()
                 return
             account.failCount = 0
             account.cooldownUntil = None
@@ -340,6 +361,10 @@ class AccountPool:
                 "cooling": bool(a.cooldownUntil and a.cooldownUntil > now),
                 "lastError": a.lastError,
                 "lastUsedAt": a.lastUsedAt,
+                "okCount": a.okCount,
+                "errCount": a.errCount,
+                "tokensIn": a.tokensIn,
+                "tokensOut": a.tokensOut,
             }
             out.append(row)
         return out
