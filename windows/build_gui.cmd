@@ -16,7 +16,7 @@ rem Generate the app icon if missing
 if not exist "assets\icon.ico" python windows\make_icon.py
 
 pyinstaller --noconfirm --onefile --windowed ^
-  --name cmdgo-gui ^
+  --name General-cmdgo-provider ^
   --icon "assets\icon.ico" ^
   --add-data "assets;assets" ^
   --hidden-import customtkinter ^
@@ -29,5 +29,5 @@ pyinstaller --noconfirm --onefile --windowed ^
   cmdgo_gui.py
 
 echo.
-echo Build complete. File is in dist\cmdgo-gui.exe
-echo   GUI + tray (windowed, no console): dist\cmdgo-gui.exe
+echo Build complete. File is in dist\General-cmdgo-provider.exe
+echo   GUI + tray (windowed, no console): dist\General-cmdgo-provider.exe

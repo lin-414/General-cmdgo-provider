@@ -62,7 +62,7 @@ Source mode requires Python 3.10 or newer. Runtime dependencies are standard-lib
 
 Pre-built Windows binaries are published on the [Releases](https://github.com/lin-414/General-cmdgo-provider/releases) page — no Python required.
 
-- **`cmdgo-gui.exe`** — modern dark-theme desktop GUI with system-tray resident mode. Double-click to launch; it auto-starts the local proxy on `http://127.0.0.1:8787`. Closing the window minimizes to the tray instead of exiting.
+- **`General-cmdgo-provider.exe`** — modern dark-theme desktop GUI with system-tray resident mode. Double-click to launch; it auto-starts the local proxy on `http://127.0.0.1:8787`. Closing the window minimizes to the tray instead of exiting.
 
 Point any OpenAI-compatible client at the local adapter:
 
@@ -209,7 +209,7 @@ Scripts are in `windows/`:
 - `install_autostart.cmd` — install per-user Windows logon startup.
 - `uninstall_autostart.cmd` — remove the startup entry.
 - `build_windows.cmd` — build the EXEs with PyInstaller.
-- `build_gui.cmd` — build the modern GUI + tray EXE (`dist\cmdgo-gui.exe`) with a bundled app icon.
+- `build_gui.cmd` — build the modern GUI + tray EXE (`dist\General-cmdgo-provider.exe`) with a bundled app icon.
 
 A portable EXE folder should contain the EXEs next to the helper scripts. The token is stored outside the repository at `%APPDATA%\\cmdgo-provider\\token.json`.
 
@@ -277,7 +277,7 @@ Command Code Go 主要面向 Command Code CLI，并且不提供静态 Provider A
 
 预编译的 Windows 程序发布在 [Releases](https://github.com/lin-414/General-cmdgo-provider/releases) 页面，**无需安装 Python**。
 
-- **`cmdgo-gui.exe`** —— 现代深色主题桌面界面 + 系统托盘常驻。双击启动即自动运行本地代理（`http://127.0.0.1:8787`）；关闭窗口时会最小化到托盘而不是退出。
+- **`General-cmdgo-provider.exe`** —— 现代深色主题桌面界面 + 系统托盘常驻。双击启动即自动运行本地代理（`http://127.0.0.1:8787`）；关闭窗口时会最小化到托盘而不是退出。
 
 把任意 OpenAI 兼容客户端指向本地适配器：
 
@@ -385,7 +385,7 @@ GUI 的「账号池」面板会列出池内账号：按用户名（或密钥名�
 - `install_autostart.cmd`：设置当前用户登录时自动启动；
 - `uninstall_autostart.cmd`：取消开机自启；
 - `build_windows.cmd`：使用 PyInstaller 构建 EXE；
-- `build_gui.cmd`：构建带应用图标的现代 GUI + 托盘 EXE（`dist\cmdgo-gui.exe`）。
+- `build_gui.cmd`：构建带应用图标的现代 GUI + 托盘 EXE（`dist\General-cmdgo-provider.exe`）。
 
 Token 保存位置：
 

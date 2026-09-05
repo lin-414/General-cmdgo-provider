@@ -60,7 +60,8 @@ def _start_proxy_if_needed(port: int, base: str) -> bool:
 
     folder = _base_dir()
     provider_exe = os.path.join(folder, "cmdgo-provider.exe")
-    gui_exe = os.path.join(folder, "cmdgo-gui.exe")
+    gui_exe = os.path.join(folder, "General-cmdgo-provider.exe")
+    legacy_gui_exe = os.path.join(folder, "cmdgo-gui.exe")
     run_py = os.path.join(folder, "run.py")
     log_dir = os.path.join(folder, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -70,8 +71,11 @@ def _start_proxy_if_needed(port: int, base: str) -> bool:
         if os.path.isfile(provider_exe):
             command = [provider_exe, "--port", str(port)]
         elif os.path.isfile(gui_exe):
-            # 新发行版只带 GUI 版 exe：GUI 启动后会自动拉起本地代理。
+            # 当前发行版的 GUI exe：启动后自动拉起本地代理。
             command = [gui_exe, "--port", str(port)]
+        elif os.path.isfile(legacy_gui_exe):
+            # 旧版文件名兼容
+            command = [legacy_gui_exe, "--port", str(port)]
         elif os.path.isfile(run_py) and not getattr(sys, "frozen", False):
             command = [sys.executable, run_py, "--port", str(port)]
         else:
