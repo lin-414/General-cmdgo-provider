@@ -903,6 +903,40 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
             pass
 
 
+def test_account(account) -> dict:
+    """对指定账号发一个迷你请求验证可用性；只报结果，不影响冷却/统计。"""
+    model = next((m["id"] for m in model_cache["models"]), None) or "Qwen/Qwen3.7-Flash"
+    envelope = openai_to_cc_envelope({"model": model, "messages": [{"role": "user", "content": "ping"}],
+                                      "max_tokens": 16})
+    headers = fingerprint_headers(account.apiKey)
+    data = json.dumps(envelope).encode("utf-8")
+    t0 = time.time()
+    conn = None
+    try:
+        conn, upstream = _open_stream(BASE_URL + "/alpha/generate", data, headers)
+    except Exception as e:
+        return {"ok": False, "status": 0, "latencyMs": int((time.time() - t0) * 1000), "message": f"连接失败: {e}"}
+    try:
+        if upstream.status >= 400:
+            raw = _safe_read(upstream)
+            msg = gateway_error_message(raw) or f"HTTP {upstream.status}"
+            return {"ok": False, "status": upstream.status,
+                    "latencyMs": int((time.time() - t0) * 1000), "message": msg[:200]}
+        events = list(iter_ndjson_lines(upstream))
+        err = next((event_error_message(ev) for ev in events if ev.get("type") == "error"), None)
+        return {"ok": err is None, "status": upstream.status,
+                "latencyMs": int((time.time() - t0) * 1000), "message": err or "ok"}
+    finally:
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def handle_chat(handler, body: dict) -> None:
     created = int(time.time())
     candidates = _chat_candidates(handler)
@@ -1271,6 +1305,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     return
                 removed = sid and pool.remove(sid)
                 send_json(self, 200 if removed else 404, {"ok": True} if removed else {"ok": False, "error": "账号不存在"})
+                return
+            if p == "/account/test":
+                raw = self._read_body()
+                body = json.loads(raw.decode("utf-8", "replace") or "{}")
+                sid = body.get("id", "")
+                account = next((a for a in pool.list() if a.id == sid), None) if sid else None
+                if account is None:
+                    send_json(self, 404, {"ok": False, "error": "账号不存在"})
+                    return
+                result = test_account(account)
+                send_json(self, 200, {"ok": True, **result})
                 return
         except Exception as e:
             # 兜底响应本身也可能写到已断开的客户端上，不能再让异常逃逸成 traceback。

@@ -399,9 +399,10 @@ class App(ctk.CTk):
             status = "●" if acc.get("enabled") and not acc.get("cooling") else ("◐" if acc.get("cooling") else "○")
             color = "#4CAF50" if acc.get("enabled") and not acc.get("cooling") else ("#d29922" if acc.get("cooling") else "#f44336")
             name = acc.get("displayName") or acc.get("userName") or acc.get("keyName") or acc.get("id")
-            lbl = ctk.CTkLabel(row, text=f"{status} {name}",
+            lbl = ctk.CTkLabel(row, text=f"{status} {name}", cursor="hand2",
                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color=color)
             lbl.pack(side="left", padx=(10, 4), pady=6)
+            lbl.bind("<Button-1>", lambda _e, i=acc.get("id", ""): self._log_account_details(i))
             # 用量统计（累计）：成功/失败次数 + token 总量
             stats = []
             if acc.get("okCount"):
@@ -417,8 +418,13 @@ class App(ctk.CTk):
                                          text_color="#666")
                 lbl_stats.pack(side="left", padx=(0, 4), pady=6)
                 self._acct_row_widgets.append(lbl_stats)
-            # 小按钮：启用/禁用 + 删除
+            # 小按钮：测试 + 启用/禁用 + 删除
             a_id = acc.get("id", "")
+            btn_test = ctk.CTkButton(row, text="测试", width=44, height=24,
+                                     font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                     fg_color="#2196F3", hover_color="#1565C0",
+                                     command=lambda i=a_id: self._test_account(i))
+            btn_test.pack(side="right", padx=2, pady=4)
             btn_toggle = ctk.CTkButton(row, text="停用" if acc.get("enabled") else "启用", width=52, height=24,
                                        font=ctk.CTkFont(family=_system_font_family(), size=11),
                                        fg_color="#607D8B", hover_color="#455A64",
@@ -429,7 +435,7 @@ class App(ctk.CTk):
                                     fg_color="#f44336", hover_color="#c62828",
                                     command=lambda i=a_id: self._remove_account(i))
             btn_del.pack(side="right", padx=2, pady=4)
-            self._acct_row_widgets.extend([row, lbl, btn_toggle, btn_del])
+            self._acct_row_widgets.extend([row, lbl, btn_test, btn_toggle, btn_del])
 
     def _toggle_account(self, a_id: str, enabled: bool):
         # 在后台线程执行，避免阻塞主线程（否则界面会卡住）。
@@ -473,6 +479,35 @@ class App(ctk.CTk):
         except Exception as e:
             proxy.log("账号删除失败: %s", e)
         self._dispatch(self._refresh_accounts)
+
+    # ---- 账号测试 / 详情 ----
+    def _test_account(self, a_id: str):
+        # 迷你请求可能要几秒，放后台线程执行
+        threading.Thread(target=self._test_account_thread, args=(a_id,), daemon=True).start()
+
+    def _test_account_thread(self, a_id: str):
+        proxy.log("正在测试账号 %s …", a_id)
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{self.port}/account/test",
+                                         data=json.dumps({"id": a_id}).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=120) as r:
+                res = json.loads(r.read())
+            if res.get("ok"):
+                proxy.log("✅ 账号 %s 测试通过（%sms）", a_id, res.get("latencyMs"))
+            else:
+                proxy.log("❌ 账号 %s 测试失败（HTTP %s）：%s", a_id, res.get("status"), res.get("message"))
+        except Exception as e:
+            proxy.log("账号 %s 测试请求失败: %s", a_id, e)
+
+    def _log_account_details(self, a_id: str):
+        acc = next((a for a in self._accounts if a.get("id") == a_id), None)
+        if not acc:
+            return
+        proxy.log("账号详情 %s：启用=%s 冷却中=%s | 成功 %s 次 / 失败 %s 次 | tokens %s/%s | lastError=%s",
+                  acc.get("id"), acc.get("enabled"), acc.get("cooling"),
+                  acc.get("okCount"), acc.get("errCount"),
+                  acc.get("tokensIn"), acc.get("tokensOut"), acc.get("lastError"))
 
     # ---- 日志轮询 ----
     def _start_log_poll(self):
