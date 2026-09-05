@@ -345,6 +345,37 @@ class AccountPool:
                 self.remove(a.id)
             return count
 
+    # ---- 导出/导入（跨机器迁移：口令加密信封，见 credstore.py） ----
+    def export_accounts(self, passphrase: str) -> bytes:
+        """把池内账号凭据导出为口令加密信封（只含 apiKey/用户名/密钥名，不含统计）。"""
+        with self._lock:
+            self._ensure_loaded()
+            if not self._accounts:
+                raise ValueError("账号池为空，没有可导出的账号")
+            rows = [{"apiKey": a.apiKey, "userName": a.userName, "keyName": a.keyName}
+                    for a in self._accounts]
+        payload = json.dumps({"accounts": rows}, ensure_ascii=False).encode("utf-8")
+        return credstore.encrypt_with_passphrase(payload, passphrase)
+
+    def import_accounts(self, payload: bytes, passphrase: str) -> int:
+        """从导出信封导入账号；已在池中的 key 跳过。返回新导入数量。"""
+        data = credstore.decrypt_with_passphrase(payload, passphrase)
+        rows = json.loads(data).get("accounts")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("导出文件里没有账号")
+        added = 0
+        with self._lock:
+            self._ensure_loaded()
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get("apiKey"), str) or not row["apiKey"]:
+                    continue
+                if self.find_by_key(row["apiKey"]) is not None:
+                    continue
+                self.add({"apiKey": row["apiKey"], "userName": row.get("userName"),
+                          "keyName": row.get("keyName")})
+                added += 1
+        return added
+
     # ---- 状态快照（绝不带明文 key 给查看接口） ----
     def describe_all(self) -> list[dict]:
         now = int(time.time() * 1000)

@@ -104,3 +104,70 @@ def write_credential(path: str, data: bytes) -> None:
     with open(tmp, "wb") as f:
         f.write(payload)
     os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
+# 口令加密（跨机器可迁移）：Fernet + PBKDF2-HMAC-SHA256。
+# 需要 cryptography 包（GUI 打包版已内置）；惰性导入，缺失时报可操作的错误。
+# 文件格式：JSON {"type","version","kdf":{"salt","iterations"},"token"}
+# ---------------------------------------------------------------------------
+EXPORT_TYPE = "cmdgo-accounts-export"
+EXPORT_VERSION = 1
+_PBKDF2_ITERATIONS = 600_000
+
+
+def _fernet(passphrase: str, salt: bytes):
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError as e:
+        raise RuntimeError("需要 cryptography 库：pip install cryptography（GUI 打包版已内置）") from e
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    import base64 as _b64
+    kdf = PBKDF2HMAC(algorithm=SHA256(), length=32, salt=salt, iterations=_PBKDF2_ITERATIONS)
+    key = _b64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+    return Fernet(key)
+
+
+def encrypt_with_passphrase(data: bytes, passphrase: str) -> bytes:
+    """用口令加密字节串，返回可写入文件的 JSON 信封（跨机器可解）。"""
+    if not passphrase:
+        raise ValueError("口令不能为空")
+    salt = random.randbytes(16)
+    token = _fernet(passphrase, salt).encrypt(data)
+    import base64 as _b64
+    import json as _json
+    envelope = {
+        "type": EXPORT_TYPE,
+        "version": EXPORT_VERSION,
+        "kdf": {"salt": _b64.b64encode(salt).decode(), "iterations": _PBKDF2_ITERATIONS},
+        "token": token.decode(),
+    }
+    return _json.dumps(envelope, indent=2).encode("utf-8")
+
+
+def decrypt_with_passphrase(payload: bytes, passphrase: str) -> bytes:
+    """解开 encrypt_with_passphrase 的信封；口令错误或文件损坏抛 ValueError。"""
+    import base64 as _b64
+    import json as _json
+    try:
+        envelope = _json.loads(payload)
+    except Exception as e:
+        raise ValueError("文件不是有效的导出信封") from e
+    if not isinstance(envelope, dict) or envelope.get("type") != EXPORT_TYPE:
+        raise ValueError("文件不是 cmdgo 账号导出文件")
+    try:
+        salt = _b64.b64decode(envelope["kdf"]["salt"])
+        iterations = int(envelope["kdf"].get("iterations", _PBKDF2_ITERATIONS))
+        token = envelope["token"].encode()
+    except Exception as e:
+        raise ValueError("导出信封字段缺失或损坏") from e
+    from cryptography.fernet import Fernet, InvalidToken
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    kdf = PBKDF2HMAC(algorithm=SHA256(), length=32, salt=salt, iterations=iterations)
+    key = _b64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+    try:
+        return Fernet(key).decrypt(token)
+    except InvalidToken as e:
+        raise ValueError("口令错误或文件已损坏") from e

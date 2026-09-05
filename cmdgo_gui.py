@@ -345,6 +345,16 @@ class App(ctk.CTk):
             text_color="#4CAF50",
         )
         self._lbl_acct_count.pack(side="right")
+        # 导出/导入（账号跨机迁移）
+        _btn_small_font = ctk.CTkFont(family=_system_font_family(), size=11)
+        self._btn_export = ctk.CTkButton(self._acct_header, text="导出", width=44, height=22,
+                                         font=_btn_small_font, fg_color="#607D8B", hover_color="#455A64",
+                                         command=self._export_accounts)
+        self._btn_export.pack(side="right", padx=(4, 10))
+        self._btn_import = ctk.CTkButton(self._acct_header, text="导入", width=44, height=22,
+                                         font=_btn_small_font, fg_color="#607D8B", hover_color="#455A64",
+                                         command=self._import_accounts)
+        self._btn_import.pack(side="right", padx=4)
         self._acct_list = ctk.CTkScrollableFrame(self._frame_acct, height=96)
         self._acct_list.pack(fill="x", padx=8, pady=(4, 8))
         self._refresh_accounts()
@@ -508,6 +518,50 @@ class App(ctk.CTk):
                   acc.get("id"), acc.get("enabled"), acc.get("cooling"),
                   acc.get("okCount"), acc.get("errCount"),
                   acc.get("tokensIn"), acc.get("tokensOut"), acc.get("lastError"))
+
+    # ---- 账号导出/导入 ----
+    def _export_accounts(self):
+        from tkinter import filedialog, simpledialog
+        passphrase = simpledialog.askstring("导出账号", "设置导出口令（导入时需要，请牢记）:",
+                                            parent=self, show="*")
+        if not passphrase:
+            return
+        confirm = simpledialog.askstring("导出账号", "请再输入一遍口令确认:", parent=self, show="*")
+        if confirm is None:
+            return
+        if confirm != passphrase:
+            proxy.log("导出失败：两次输入的口令不一致")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".cmdgo", initialfile="cmdgo-accounts.cmdgo",
+            filetypes=[("cmdgo 账号导出", "*.cmdgo"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            data = proxy.pool.export_accounts(passphrase)
+            with open(path, "wb") as f:
+                f.write(data)
+            proxy.log("已导出 %d 个账号 -> %s（请妥善保管口令与文件）", proxy.pool.size, path)
+        except Exception as e:
+            proxy.log("导出失败: %s", e)
+
+    def _import_accounts(self):
+        from tkinter import filedialog, simpledialog
+        path = filedialog.askopenfilename(
+            parent=self, filetypes=[("cmdgo 账号导出", "*.cmdgo"), ("所有文件", "*.*")])
+        if not path:
+            return
+        passphrase = simpledialog.askstring("导入账号", "输入导出时设置的口令:", parent=self, show="*")
+        if passphrase is None:
+            return
+        try:
+            with open(path, "rb") as f:
+                payload = f.read()
+            added = proxy.pool.import_accounts(payload, passphrase)
+            proxy.log("导入完成：新增 %d 个账号（已存在的 key 自动跳过）", added)
+        except Exception as e:
+            proxy.log("导入失败: %s", e)
+        self._refresh_accounts()
 
     # ---- 日志轮询 ----
     def _start_log_poll(self):

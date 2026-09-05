@@ -192,5 +192,49 @@ class PoolEncryptionTest(unittest.TestCase):
         self.assertEqual(p2.list()[0].apiKey, "k1-secret")
 
 
+try:
+    import cryptography  # noqa: F401
+    _HAS_CRYPTO = True
+except ImportError:
+    _HAS_CRYPTO = False
+
+
+@unittest.skipUnless(_HAS_CRYPTO, "cryptography not installed")
+class PassphraseExportTest(unittest.TestCase):
+    """口令加密 + 账号导出/导入回环（跨机器迁移路径）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cmdgo-export-test-")
+
+    def test_passphrase_roundtrip(self):
+        data = b'{"accounts": [{"apiKey": "k1-secret"}]}'
+        enc = credstore.encrypt_with_passphrase(data, "pass-phrase-1")
+        self.assertNotIn(b"k1-secret", enc)  # 密文不含明文 key
+        self.assertEqual(credstore.decrypt_with_passphrase(enc, "pass-phrase-1"), data)
+        with self.assertRaises(ValueError):
+            credstore.decrypt_with_passphrase(enc, "wrong-passphrase")
+        with self.assertRaises(ValueError):
+            credstore.decrypt_with_passphrase(b"not-an-envelope", "pass-phrase-1")
+
+    def test_pool_export_import_roundtrip(self):
+        p1 = pool.AccountPool("cmdgo", log=lambda m: None, file=os.path.join(self.tmp, "a.json"))
+        p1.add({"apiKey": "k1", "userName": "alice"})
+        p1.add({"apiKey": "k2", "userName": "bob"})
+        blob = p1.export_accounts("pw123")
+        # 导入到另一个池：k2 已存在跳过，k1 新增
+        p2 = pool.AccountPool("cmdgo", log=lambda m: None, file=os.path.join(self.tmp, "b.json"))
+        p2.add({"apiKey": "k2", "userName": "bob"})
+        added = p2.import_accounts(blob, "pw123")
+        self.assertEqual(added, 1)
+        self.assertEqual(p2.size, 2)
+        self.assertEqual(p2.find_by_key("k1").userName, "alice")
+        with self.assertRaises(ValueError):
+            p2.import_accounts(blob, "bad-pw")
+        # 空池导出应报错
+        p3 = pool.AccountPool("cmdgo", log=lambda m: None, file=os.path.join(self.tmp, "c.json"))
+        with self.assertRaises(ValueError):
+            p3.export_accounts("pw")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

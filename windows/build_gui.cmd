@@ -5,7 +5,7 @@ cd /d "%~dp0.."
 where pyinstaller >nul 2>nul
 if errorlevel 1 (
   echo PyInstaller was not found.
-  echo Install it with: python -m pip install pyinstaller customtkinter pystray pillow
+  echo Install it with: python -m pip install pyinstaller customtkinter pystray pillow cryptography
   exit /b 1
 )
 
@@ -26,6 +26,7 @@ pyinstaller --noconfirm --onefile --windowed ^
   --hidden-import pystray ^
   --hidden-import pystray._win32 ^
   --hidden-import pool ^
+  --hidden-import cryptography ^
   cmdgo_gui.py
 
 echo.

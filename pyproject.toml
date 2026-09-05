@@ -9,7 +9,7 @@ description = "Local OpenAI-compatible adapter for Command Code Go"
 requires-python = ">=3.10"
 dependencies = []
 [project.optional-dependencies]
-gui = ["customtkinter>=5.2", "pystray>=0.19", "pillow>=9.0"]
+gui = ["customtkinter>=5.2", "pystray>=0.19", "pillow>=9.0", "cryptography>=42.0"]
 
 
 [tool.pytest.ini_options]
