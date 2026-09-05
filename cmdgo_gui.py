@@ -12,6 +12,7 @@ import argparse
 import ctypes
 import json
 import logging
+import logging.handlers
 import os
 import queue
 import sys
@@ -19,6 +20,7 @@ import threading
 import time
 import tkinter
 import urllib.request
+import webbrowser
 
 # ---------------------------------------------------------------------------
 # 把 cmdgo_provider 的日志重定向到 GUI
@@ -54,6 +56,19 @@ import cmdgo_provider as proxy  # noqa: E402
 import appicon  # noqa: E402
 
 # ---------------------------------------------------------------------------
+# 日志落盘（轮转）：GUI 运行期间同步写进用户数据目录，便于事后排查
+# ---------------------------------------------------------------------------
+try:
+    _log_dir = os.path.join(proxy._data_dir(), "logs")
+    os.makedirs(_log_dir, exist_ok=True)
+    _file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(_log_dir, "app.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    _file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s"))
+    logging.root.addHandler(_file_handler)
+except Exception:
+    pass  # 日志目录不可写不影响运行
+
+# ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
 import customtkinter as ctk  # noqa: E402  # 必须在日志配置之后导入
@@ -81,8 +96,64 @@ def _make_tray_icon(color: str = appicon.BASE_COLOR, size: int = 64):
     return appicon.make_icon_image(color, size)
 
 
+# ---------------------------------------------------------------------------
+# 开机自启（Windows：HKCU Run 键；配合 --minimized 启动即常驻托盘）
+# ---------------------------------------------------------------------------
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE = "General-cmdgo-provider"
+
+
+def autostart_supported() -> bool:
+    return os.name == "nt"
+
+
+def autostart_enabled() -> bool:
+    if not autostart_supported():
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.QueryValueEx(k, _RUN_VALUE)
+        return True
+    except OSError:
+        return False
+
+
+def _autostart_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --minimized'
+    # 源码运行：用 pythonw 避免开机时闪控制台窗口
+    pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+    return f'"{pythonw}" "{os.path.abspath(__file__)}" --minimized'
+
+
+def set_autostart(enabled: bool) -> bool:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, _RUN_VALUE, 0, winreg.REG_SZ, _autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(k, _RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as e:
+        proxy.log("开机自启设置失败: %s", e)
+        return False
+
+
+def _version_tuple(v: str) -> tuple:
+    """'v0.10.2' -> (0, 10, 2)；解析失败返回空元组（视为不比较）。"""
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("vV").split("."))
+    except Exception:
+        return ()
+
+
 class App(ctk.CTk):
-    def __init__(self, port: int):
+    def __init__(self, port: int, start_minimized: bool = False):
         super().__init__()
 
         # 让全局主题字体跟随系统默认（按钮/标签等未显式指定 font 的控件都会继承）
@@ -119,6 +190,11 @@ class App(ctk.CTk):
 
         # 自动启动代理
         self.after(300, self._toggle_proxy)
+        # 开机自启传入 --minimized：先渲染一拍再收进托盘
+        if start_minimized:
+            self.after(600, self._minimize_to_tray)
+        # 检查新版本（后台线程，静默失败）
+        threading.Thread(target=self._check_update_thread, daemon=True).start()
 
     # ---- 跨线程安全调度 ----
     def _start_dispatch(self):
@@ -203,6 +279,29 @@ class App(ctk.CTk):
             text_color="#aaa",
         )
         self._lbl_info.pack(side="right", padx=16, pady=12)
+
+        # 更新提示（有新版本时显示，点击打开发布页）
+        self._update_url = ""
+        self._lbl_update = ctk.CTkLabel(
+            self._frame_status, text="", cursor="hand2",
+            font=ctk.CTkFont(family=_system_font_family(), size=13),
+        )
+        self._lbl_update.pack(side="right", padx=(0, 12))
+        self._lbl_update.bind(
+            "<Button-1>", lambda _e: webbrowser.open(self._update_url) if self._update_url else None)
+
+        # 开机自启开关（仅 Windows）
+        self._chk_autostart = ctk.CTkCheckBox(
+            self._frame_status, text="开机自启", width=92,
+            font=ctk.CTkFont(family=_system_font_family(), size=12),
+            command=self._toggle_autostart,
+        )
+        if autostart_supported():
+            self._chk_autostart.pack(side="right", padx=(0, 4))
+            if autostart_enabled():
+                self._chk_autostart.select()
+        else:
+            self._chk_autostart.configure(state="disabled")
 
         # 按钮栏
         self._frame_btn = ctk.CTkFrame(self, height=50, fg_color="transparent")
@@ -462,6 +561,39 @@ class App(ctk.CTk):
         # 定期刷新
         self.after(10_000, self._update_info)
 
+    # ---- 开机自启 ----
+    def _toggle_autostart(self):
+        enabled = bool(self._chk_autostart.get())
+        if set_autostart(enabled):
+            proxy.log("开机自启已%s", "开启（登录 Windows 后自动常驻托盘）" if enabled else "关闭")
+            return
+        # 写注册表失败：回滚勾选状态
+        if enabled:
+            self._chk_autostart.deselect()
+        else:
+            self._chk_autostart.select()
+
+    # ---- 新版本检查 ----
+    def _check_update_thread(self):
+        try:
+            req = urllib.request.Request(proxy.GITHUB_LATEST_URL,
+                                         headers={"Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read())
+            tag = str(data.get("tag_name", "")).lstrip("vV")
+            url = data.get("html_url") or proxy.GITHUB_LATEST_URL
+            if not tag or not _version_tuple(tag) or not _version_tuple(proxy.APP_VERSION):
+                return
+            if _version_tuple(tag) > _version_tuple(proxy.APP_VERSION):
+                self._dispatch(self._show_update_banner, tag, url)
+        except Exception:
+            pass  # 无网络/GitHub 不可达：静默跳过
+
+    def _show_update_banner(self, tag: str, url: str):
+        self._update_url = url
+        self._lbl_update.configure(text=f"⬆ 新版本 v{tag}", text_color="#d29922")
+        proxy.log("发现新版本 v%s（当前 %s）：点击状态栏提示可前往下载页", tag, proxy.APP_VERSION)
+
     # ---- OAuth 登录 ----
     def _do_login(self):
         if not self._running:
@@ -582,15 +714,16 @@ class App(ctk.CTk):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="cmdgo-provider 图形界面")
+    ap = argparse.ArgumentParser(description="General-cmdgo-provider 图形界面")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8787")))
+    ap.add_argument("--minimized", action="store_true", help="启动后直接最小化到系统托盘（开机自启用）")
     args = ap.parse_args()
 
     # 单实例保护：用命名互斥量避免启动第二个实例。
     # 否则会再注册一个托盘图标、且第二个实例的服务器绑不上 8787 端口。
     _acquire_single_instance()
 
-    app = App(port=args.port)
+    app = App(port=args.port, start_minimized=args.minimized)
     app.mainloop()
 
 
