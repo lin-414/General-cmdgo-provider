@@ -61,7 +61,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("PORT", "8787"))
 BASE_URL = (os.environ.get("COMMANDCODE_BASE_URL", "https://api.commandcode.ai")).rstrip("/")
 # 应用版本：发版时与 pyproject.toml 的 version 一同更新（GUI 用它检查新版本）。
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 GITHUB_LATEST_URL = "https://api.github.com/repos/lin-414/General-cmdgo-provider/releases/latest"
 CC_VERSION = os.environ.get("CC_VERSION", "1.31.0")
 PROJECT_SLUG = os.environ.get("CC_PROJECT_SLUG", "dsh-cmdgo")
