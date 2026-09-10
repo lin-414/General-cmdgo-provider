@@ -567,18 +567,23 @@ class App(ctk.CTk):
                 widgets["bar"].set(0)
                 widgets["sub"].configure(text="")
 
-        monthly = (credits.get("credits") or {}).get("monthlyCredits")
-        used_credits = usage.get("totalCredits")
+        # 月度额度：上游给的是「已用」(summary.totalMonthlyCredits) 和「剩余」
+        # (credits.monthlyCredits)，上限 = 已用 + 剩余（与官方页面口径一致）。
+        monthly_used = usage.get("totalMonthlyCredits")
+        monthly_remaining = (credits.get("credits") or {}).get("monthlyCredits")
+        used_val = monthly_used if isinstance(monthly_used, (int, float)) else 0.0
+        remain_val = monthly_remaining if isinstance(monthly_remaining, (int, float)) else 0.0
+        cap_val = used_val + remain_val
         widgets = self._quota_widgets["monthly"]
-        if isinstance(monthly, (int, float)) and monthly:
-            used_val = used_credits if isinstance(used_credits, (int, float)) else 0
-            widgets["value"].configure(text=f"{used_val / monthly * 100:.1f}%")
-            widgets["bar"].set(min(max(used_val / monthly, 0.0), 1.0))
-            widgets["sub"].configure(text=f"{used_val:.2f} / {monthly:g} credits · 当前计费周期")
+        if cap_val > 0:
+            widgets["value"].configure(text=f"{used_val / cap_val * 100:.1f}%")
+            widgets["bar"].set(min(max(used_val / cap_val, 0.0), 1.0))
+            widgets["sub"].configure(
+                text=f"已用 {used_val:.2f} / {cap_val:.2f} credits · 剩余 {remain_val:.2f}")
         else:
             widgets["value"].configure(text="—")
             widgets["bar"].set(0)
-            widgets["sub"].configure(text="")
+            widgets["sub"].configure(text="按量计费（无限额）")
 
         if data.get("ok"):
             total = usage.get("totalCount")
