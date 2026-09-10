@@ -693,6 +693,59 @@ def pool_status() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 用量与额度（上游 /alpha/usage/summary + /alpha/billing/credits，短缓存）
+# ---------------------------------------------------------------------------
+_usage_cache: dict = {"at": 0.0, "data": None}
+USAGE_CACHE_S = 30
+
+
+def _usage_key() -> str:
+    """优先用缓存 key（登录的那个）；否则取池中第一个启用账号。"""
+    if cached_api_key:
+        return cached_api_key
+    for a in pool.list():
+        if a.enabled and a.apiKey:
+            return a.apiKey
+    return ""
+
+
+def _upstream_get(path: str, key: str):
+    """GET 上游 alpha 接口：返回 (status, parsed|None, raw_text)。"""
+    try:
+        req = urllib.request.Request(BASE_URL + path, headers=fingerprint_headers(key))
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", "replace")
+            try:
+                return r.status, json.loads(raw), raw
+            except Exception:
+                return r.status, None, raw
+    except urllib.error.HTTPError as e:
+        return e.code, None, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, None, str(e)
+
+
+def usage_overview(force: bool = False) -> dict:
+    """用量/额度聚合：上游 summary + credits + 本地账号统计。带短缓存避免刷爆上游。"""
+    now = time.time()
+    if not force and _usage_cache["data"] is not None and now - _usage_cache["at"] < USAGE_CACHE_S:
+        return _usage_cache["data"]
+    out: dict = {"ok": False, "local": pool_status(), "at": int(now * 1000)}
+    key = _usage_key()
+    if not key:
+        out["error"] = "尚未登录：先完成 OAuth 登录后才有用量与额度数据"
+    else:
+        st1, summary, raw1 = _upstream_get("/alpha/usage/summary", key)
+        st2, credits, raw2 = _upstream_get("/alpha/billing/credits", key)
+        if summary is not None or credits is not None:
+            out.update({"ok": True, "usage": summary, "credits": credits})
+        else:
+            out["error"] = gateway_error_message(raw1) or f"HTTP {st1}"
+    _usage_cache.update({"at": now, "data": out})
+    return out
+
+
 def persist_login_key(info: dict) -> None:
     """登录成功后：key 已入池则只刷新标签，否则新增账号入池。"""
     api_key = info.get("apiKey")
@@ -1239,6 +1292,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         if p == "/account/list":
             send_json(self, 200, {"ok": True, **pool_status()})
+            return
+        if p == "/usage/overview":
+            force = "refresh=1" in self.path
+            send_json(self, 200, {"ok": True, **usage_overview(force=force)})
             return
         if p in ("", "/"):
             body = _WEB_UI_HTML.replace("__PORT__", str(PORT)).encode("utf-8")

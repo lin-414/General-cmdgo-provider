@@ -64,6 +64,16 @@ Pre-built Windows binaries are published on the [Releases](https://github.com/li
 
 - **`General-cmdgo-provider.exe`** — modern dark-theme desktop GUI with system-tray resident mode. Double-click to launch; it auto-starts the local proxy on `http://127.0.0.1:8787`. Closing the window minimizes to the tray instead of exiting.
 
+The desktop app is organized into five tabs:
+
+| Tab | What it shows |
+|-----|---------------|
+| 概览 (Overview) | Proxy status, listen address, uptime, account/model counts, current account, app & CLI versions, start/stop and OAuth controls |
+| 账号 (Accounts) | Account pool list — status dot, per-account usage, test / enable / disable / delete, passphrase-encrypted export & import |
+| 用量与额度 (Usage & Quota) | Live upstream quota: 5-hour and weekly windows (used/cap + reset countdown), monthly credits, total requests & success rate, input/output token totals, cost, plus locally accumulated per-account totals |
+| 模型型号 (Models) | Searchable model catalog with context window (e.g. `200K`, `1M`) |
+| 实时日志 (Logs) | Live log view, also rotated to `%APPDATA%\cmdgo-provider\logs\app.log` |
+
 Point any OpenAI-compatible client at the local adapter:
 
 ```text
@@ -278,6 +288,16 @@ Command Code Go 主要面向 Command Code CLI，并且不提供静态 Provider A
 预编译的 Windows 程序发布在 [Releases](https://github.com/lin-414/General-cmdgo-provider/releases) 页面，**无需安装 Python**。
 
 - **`General-cmdgo-provider.exe`** —— 现代深色主题桌面界面 + 系统托盘常驻。双击启动即自动运行本地代理（`http://127.0.0.1:8787`）；关闭窗口时会最小化到托盘而不是退出。
+
+桌面程序分为五个标签页：
+
+| 标签页 | 内容 |
+|--------|------|
+| 概览 | 代理状态、监听地址、运行时长、账号/模型数量、当前账号、程序与 CLI 版本，以及启动/停止与 OAuth 登录入口 |
+| 账号 | 账号池列表 —— 状态点、各账号用量、测试 / 停用 / 删除，以及口令加密的导出/导入 |
+| 用量与额度 | 上游实时额度：5 小时窗口与本周窗口（已用/上限 + 重置倒计时）、月度额度、总请求数与成功率、输入/输出 tokens 合计、成本，以及本地累计的各账号用量 |
+| 模型型号 | 可搜索的模型目录，含上下文窗口（如 `200K`、`1M`） |
+| 实时日志 | 实时日志视图，同时轮转写入 `%APPDATA%\cmdgo-provider\logs\app.log` |
 
 把任意 OpenAI 兼容客户端指向本地适配器：
 
