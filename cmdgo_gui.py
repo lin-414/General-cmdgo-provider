@@ -493,6 +493,9 @@ class App(ctk.CTk):
                                              font=ctk.CTkFont(family=_system_font_family(), size=11),
                                              text_color="#8b949e")
         self._lbl_model_count.pack(side="right", padx=(8, 0))
+        ctk.CTkLabel(head, text="点击模型 id 即复制",
+                     font=ctk.CTkFont(family=_system_font_family(), size=11),
+                     text_color="#8b949e").pack(side="right", padx=(8, 0))
         self._model_list = ctk.CTkScrollableFrame(parent)
         self._model_list.pack(fill="both", expand=True, pady=(2, 0))
         self._model_rows = []
@@ -515,7 +518,9 @@ class App(ctk.CTk):
                       fg_color="#607D8B", hover_color="#455A64",
                       command=self._clear_log).pack(side="right")
         self._txt_log = ctk.CTkTextbox(
-            parent, font=ctk.CTkFont(family="Consolas", size=12), state="disabled", wrap="word",
+            # 日志含中文：用系统默认字体，避免等宽字体对中文回退造成混排不一致
+            parent, font=ctk.CTkFont(family=_system_font_family(), size=12),
+            state="disabled", wrap="word",
         )
         self._txt_log.pack(fill="both", expand=True)
 
@@ -553,9 +558,10 @@ class App(ctk.CTk):
             win = windows.get(key) or {}
             used, cap = win.get("used"), win.get("cap")
             if isinstance(used, (int, float)) and isinstance(cap, (int, float)) and cap:
-                widgets["value"].configure(text=f"{used:g} / {cap:g}")
+                widgets["value"].configure(text=f"{used / cap * 100:.1f}%")
                 widgets["bar"].set(min(max(used / cap, 0.0), 1.0))
-                widgets["sub"].configure(text=_reset_text(win.get("resetAt")))
+                reset = _reset_text(win.get("resetAt"))
+                widgets["sub"].configure(text=f"{used:g} / {cap:g}" + (f" · {reset}" if reset else ""))
             else:
                 widgets["value"].configure(text="—")
                 widgets["bar"].set(0)
@@ -566,9 +572,9 @@ class App(ctk.CTk):
         widgets = self._quota_widgets["monthly"]
         if isinstance(monthly, (int, float)) and monthly:
             used_val = used_credits if isinstance(used_credits, (int, float)) else 0
-            widgets["value"].configure(text=f"{used_val:.2f} / {monthly:g}")
+            widgets["value"].configure(text=f"{used_val / monthly * 100:.1f}%")
             widgets["bar"].set(min(max(used_val / monthly, 0.0), 1.0))
-            widgets["sub"].configure(text="credits（当前计费周期）")
+            widgets["sub"].configure(text=f"{used_val:.2f} / {monthly:g} credits · 当前计费周期")
         else:
             widgets["value"].configure(text="—")
             widgets["bar"].set(0)
@@ -624,6 +630,15 @@ class App(ctk.CTk):
                          text_color="#8b949e").pack(side="right", padx=(0, 12))
             self._usage_rows.extend([row])
 
+    def _copy_model_id(self, model_id: str):
+        """把模型 id 复制到剪贴板（点击模型行触发）。"""
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(model_id)
+            proxy.log("已复制模型 id：%s", model_id)
+        except Exception as e:
+            proxy.log("复制模型 id 失败: %s", e)
+
     def _render_models(self):
         models = proxy.model_cache.get("models", [])
         query = (self._ent_model.get() or "").strip().lower()
@@ -654,9 +669,14 @@ class App(ctk.CTk):
             ctk.CTkLabel(row, text=m.get("name") or "",
                          font=ctk.CTkFont(family=_system_font_family(), size=11),
                          text_color="#8b949e").pack(side="right", padx=(6, 6))
-            ctk.CTkLabel(row, text=m["id"],
-                         font=ctk.CTkFont(family="Consolas", size=12),
-                         text_color="#e6edf3", anchor="w").pack(side="left", padx=(10, 6), pady=4)
+            mid = m["id"]
+            lbl_id = ctk.CTkLabel(row, text=mid, cursor="hand2",
+                                  font=ctk.CTkFont(family="Consolas", size=12),
+                                  text_color="#e6edf3", anchor="w")
+            lbl_id.pack(side="left", padx=(10, 6), pady=4)
+            # 点击模型 id（或整行）复制到剪贴板
+            lbl_id.bind("<Button-1>", lambda _e, i=mid: self._copy_model_id(i))
+            row.bind("<Button-1>", lambda _e, i=mid: self._copy_model_id(i))
             self._model_rows.append(row)
 
     # ---- 账号池 ----
