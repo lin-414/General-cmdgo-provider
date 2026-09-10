@@ -15,7 +15,8 @@ if not exist dist mkdir dist
 rem Generate the app icon if missing
 if not exist "assets\icon.ico" python windows\make_icon.py
 
-pyinstaller --noconfirm --onefile --windowed ^
+rem Use "python -m PyInstaller" so it is the same interpreter as "python" above
+python -m PyInstaller --noconfirm --onefile --windowed ^
   --name General-cmdgo-provider ^
   --icon "assets\icon.ico" ^
   --add-data "assets;assets" ^
@@ -28,6 +29,13 @@ pyinstaller --noconfirm --onefile --windowed ^
   --hidden-import pool ^
   --hidden-import cryptography ^
   cmdgo_gui.py
+
+rem Fail loudly if PyInstaller failed: otherwise we would report success with a stale dist
+if errorlevel 1 (
+  echo.
+  echo BUILD FAILED. If the exe is in use, close the running app first ^(tray -^> exit^).
+  exit /b 1
+)
 
 echo.
 echo Build complete. File is in dist\General-cmdgo-provider.exe
