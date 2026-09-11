@@ -107,6 +107,42 @@ def autostart_supported() -> bool:
     return os.name == "nt"
 
 
+def _find_app_window() -> int:
+    """按标题查找本应用主窗口的句柄（0 = 不存在）。用于第二实例唤醒已有窗口。"""
+    try:
+        return ctypes.windll.user32.FindWindowW(None, "General-cmdgo-provider") or 0
+    except Exception:
+        return 0
+
+
+def _own_main_window_exists() -> bool:
+    """当前进程是否仍拥有 Tk 顶层窗口（类名 TkTopLevel）。
+
+    注意必须用 GetClassNameW 而不是 GetWindowTextW：后者对同进程窗口会发送
+    WM_GETTEXT 消息，一旦主线程不再处理消息（无头僵尸场景），探测线程会被
+    永久阻塞，看门狗失效。GetClassNameW 只读类注册信息，不发送任何消息。
+    """
+    try:
+        pid = os.getpid()
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        def callback(hwnd, _lparam):
+            owner = ctypes.c_uint(0)
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid:
+                buf = ctypes.create_unicode_buffer(256)
+                ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+                if buf.value == "TkTopLevel":
+                    found.append(hwnd)
+            return 1
+
+        ctypes.windll.user32.EnumWindows(callback, None)
+        return bool(found)
+    except Exception:
+        return True  # 探测失败时保守处理：视为存在，不误杀
+
+
 def autostart_enabled() -> bool:
     if not autostart_supported():
         return False
@@ -203,6 +239,7 @@ class App(ctk.CTk):
         self._server = None
         self._running = False
         self._started_at = None      # 代理启动时间（概览页运行时长）
+        self._window_created = False  # 主窗口是否已创建（看门狗用）
         self._tray_icon = None
         self._tray_thread = None
         self._accounts = []          # 账号池快照（来自 /account/list）
@@ -222,6 +259,7 @@ class App(ctk.CTk):
         self._tk_icon = self._load_window_icon()
 
         self._build_ui()
+        self._window_created = True
         self._start_log_poll()
         self._start_dispatch()
 
@@ -232,6 +270,9 @@ class App(ctk.CTk):
             self.after(600, self._minimize_to_tray)
         # 检查新版本（后台线程，静默失败）
         threading.Thread(target=self._check_update_thread, daemon=True).start()
+        # 主窗口看门狗（独立于 Tk 主循环，仅 Windows）
+        if os.name == "nt":
+            threading.Thread(target=self._window_watchdog, daemon=True).start()
 
     # ---- 跨线程安全调度 ----
     def _start_dispatch(self):
@@ -1140,9 +1181,34 @@ class App(ctk.CTk):
             pass
 
     def _restore_from_tray(self):
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            logging.getLogger(__name__).exception("从托盘恢复窗口失败")
+
+    def _window_watchdog(self):
+        """主窗口看门狗：独立于 Tk 主循环的 Win32 探测。
+
+        背景：一次长时间运行后，退出流程卡住导致 Tk 窗口被销毁而进程未退出，
+        变成"无头僵尸"——代理还在跑、单实例互斥量还被握着，用户双击 exe 只会被
+        静默拦截，彻底打不开。此看门狗用纯 Win32 查询（不依赖主线程，主循环
+        卡死也能工作）：窗口创建之后一旦持续找不到，就立即结束进程，释放
+        互斥量与端口，让用户能够重新启动。
+        """
+        time.sleep(2)  # 给窗口创建留出时间
+        misses = 0
+        while True:
+            time.sleep(2)
+            if self._window_created and _own_main_window_exists():
+                misses = 0
+            elif self._window_created:
+                misses += 1
+                if misses >= 3:
+                    logging.getLogger(__name__).warning(
+                        "主窗口已销毁但进程仍在运行（无头僵尸），自我结束以释放单实例互斥量")
+                    os._exit(0)
 
     # ---- 关闭 ----
     def _on_close(self):
@@ -1175,7 +1241,7 @@ _INSTANCE_MUTEX = None
 
 
 def _acquire_single_instance(name: str = "Global\\cmdgo-provider-gui") -> bool:
-    """尝试获取单实例互斥量；若已有实例在运行则立即退出进程。
+    """尝试获取单实例互斥量；若已有实例在运行则唤醒其窗口后立即退出进程。
 
     返回 True 表示当前进程是唯一实例（可继续运行）；返回 False 表示已有实例。
     Windows 下返回 ERROR_ALREADY_EXISTS (183) 即已有实例在运行。
@@ -1186,7 +1252,10 @@ def _acquire_single_instance(name: str = "Global\\cmdgo-provider-gui") -> bool:
         if handle:
             _INSTANCE_MUTEX = handle  # 保持引用，避免句柄被 GC 释放
             if ctypes.windll.kernel32.GetLastError() == 183:
-                # 已有实例在运行：直接退出，避免第二个托盘图标。不弹窗，避免阻塞。
+                # 已有实例在运行：唤醒其窗口；唤不出（窗口已销毁的僵尸）则明确告知，
+                # 绝不静默退出——否则用户只会觉得"程序打不开了"。
+                if not _wake_existing_window():
+                    _notify_already_running()
                 try:
                     sys.exit(0)
                 except SystemExit:
@@ -1197,6 +1266,33 @@ def _acquire_single_instance(name: str = "Global\\cmdgo-provider-gui") -> bool:
         # 非 Windows 或拿不到互斥量：不阻断运行。
         pass
     return True
+
+
+def _wake_existing_window() -> bool:
+    """把已运行实例的主窗口还原并置前（托盘最小化场景）。"""
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, "General-cmdgo-provider")
+        if not hwnd:
+            return False
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def _notify_already_running():
+    """找不到可唤醒窗口时的兜底提示（替代曾经的静默退出）。"""
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "General-cmdgo-provider 已在运行（系统托盘常驻）。\n\n"
+            "若窗口无法唤出，请在任务管理器结束 General-cmdgo-provider 进程后重试。",
+            "General-cmdgo-provider",
+            0x40)  # MB_ICONINFORMATION
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
