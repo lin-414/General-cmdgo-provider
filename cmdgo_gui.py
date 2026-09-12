@@ -244,10 +244,13 @@ class App(ctk.CTk):
         self._tray_thread = None
         self._accounts = []          # 账号池快照（来自 /account/list）
         self._acct_row_widgets = []  # 账号列表行控件引用
-        self._acct_refreshing = False  # 防止并发账号刷新
         # 跨线程安全调度：所有非主线程对 UI 的更新都入队，由主循环轮询执行。
         self._dispatch_q: "queue.Queue" = queue.Queue()
         self._dispatch_started = False
+        # 常驻轮询线程的唤醒事件（见 _account_poller / _usage_poller）
+        self._wake_accounts = threading.Event()
+        self._wake_usage = threading.Event()
+        self._usage_force = False
 
         # 窗口设置
         self.title("General-cmdgo-provider")
@@ -258,10 +261,27 @@ class App(ctk.CTk):
         # 窗口/任务栏图标与托盘同款（绿色圆形 G），不再使用 assets/icon.ico 旧设计
         self._tk_icon = self._load_window_icon()
 
+        # 共享字体：所有控件复用这几个对象，渲染路径绝不现场创建 CTkFont。
+        # 原因：tkinter Font 的析构需要跨线程进入主线程的 Tcl 解释器；此前每次
+        # 渲染都创建字体、销毁的 Font 等 GC 回收，若 GC 恰好在某个工作线程的
+        # 引导阶段触发、而主线程又在 Thread.start() 里等这个线程启动，就构成
+        # 循环死锁 —— 表现为长时间运行后界面与托盘整体冻结、代理却仍在服务。
+        self._f_status = ctk.CTkFont(family=_system_font_family(), size=18, weight="bold")
+        self._f_card = ctk.CTkFont(family=_system_font_family(), size=19, weight="bold")
+        self._f_section = ctk.CTkFont(family=_system_font_family(), size=13, weight="bold")
+        self._f_h = ctk.CTkFont(family=_system_font_family(), size=13)
+        self._f_body_bold = ctk.CTkFont(family=_system_font_family(), size=12, weight="bold")
+        self._f_body = ctk.CTkFont(family=_system_font_family(), size=12)
+        self._f_small = ctk.CTkFont(family=_system_font_family(), size=11)
+        self._f_mono = ctk.CTkFont(family="Consolas", size=12)
+
         self._build_ui()
         self._window_created = True
         self._start_log_poll()
         self._start_dispatch()
+        # 常驻轮询线程：账号池每 5 秒、用量每 60 秒（不再从主线程 Thread.start()）
+        threading.Thread(target=self._account_poller, daemon=True, name="account-poller").start()
+        threading.Thread(target=self._usage_poller, daemon=True, name="usage-poller").start()
 
         # 自动启动代理
         self.after(300, self._toggle_proxy)
@@ -346,14 +366,14 @@ class App(ctk.CTk):
 
         self._lbl_status = ctk.CTkLabel(
             self._frame_status, text="● 已停止",
-            font=ctk.CTkFont(family=_system_font_family(), size=18, weight="bold"),
+            font=self._f_status,
             text_color="#f44336",
         )
         self._lbl_status.pack(side="left", padx=16, pady=12)
 
         self._lbl_info = ctk.CTkLabel(
             self._frame_status, text=f"端口 {self.port}  |  模型 —",
-            font=ctk.CTkFont(family=_system_font_family(), size=13),
+            font=self._f_h,
             text_color="#aaa",
         )
         self._lbl_info.pack(side="right", padx=16, pady=12)
@@ -362,7 +382,7 @@ class App(ctk.CTk):
         self._update_url = ""
         self._lbl_update = ctk.CTkLabel(
             self._frame_status, text="", cursor="hand2",
-            font=ctk.CTkFont(family=_system_font_family(), size=13),
+            font=self._f_h,
         )
         self._lbl_update.pack(side="right", padx=(0, 12))
         self._lbl_update.bind(
@@ -371,7 +391,7 @@ class App(ctk.CTk):
         # 开机自启开关（仅 Windows）
         self._chk_autostart = ctk.CTkCheckBox(
             self._frame_status, text="开机自启", width=92,
-            font=ctk.CTkFont(family=_system_font_family(), size=12),
+            font=self._f_body,
             command=self._toggle_autostart,
         )
         if autostart_supported():
@@ -406,10 +426,10 @@ class App(ctk.CTk):
         for col, (key, title, value, color) in enumerate(specs):
             card = ctk.CTkFrame(cards, corner_radius=10)
             card.grid(row=0, column=col, padx=(0 if col == 0 else 4, 0 if col == 3 else 4), sticky="nsew")
-            ctk.CTkLabel(card, text=title, font=ctk.CTkFont(family=_system_font_family(), size=12),
+            ctk.CTkLabel(card, text=title, font=self._f_body,
                          text_color="#8b949e").pack(anchor="w", padx=12, pady=(10, 0))
             lbl = ctk.CTkLabel(card, text=value, text_color=color or "#e6edf3",
-                               font=ctk.CTkFont(family=_system_font_family(), size=19, weight="bold"))
+                               font=self._f_card)
             lbl.pack(anchor="w", padx=12, pady=(0, 12))
             self._ov_labels[key] = lbl
 
@@ -440,7 +460,7 @@ class App(ctk.CTk):
         info.pack(fill="both", expand=True)
         self._lbl_ov_detail = ctk.CTkLabel(
             info, text="—", justify="left", anchor="w",
-            font=ctk.CTkFont(family=_system_font_family(), size=12), text_color="#8b949e",
+            font=self._f_body, text_color="#8b949e",
         )
         self._lbl_ov_detail.pack(fill="x", padx=12, pady=12)
 
@@ -449,14 +469,14 @@ class App(ctk.CTk):
         self._acct_header = ctk.CTkFrame(parent, fg_color="transparent")
         self._acct_header.pack(fill="x", pady=(2, 4))
         ctk.CTkLabel(self._acct_header, text="账号池（多号轮询）",
-                     font=ctk.CTkFont(family=_system_font_family(), size=13, weight="bold"),
+                     font=self._f_section,
                      text_color="#aaa").pack(side="left")
         self._lbl_acct_count = ctk.CTkLabel(
             self._acct_header, text="0 个账号",
-            font=ctk.CTkFont(family=_system_font_family(), size=12), text_color="#4CAF50",
+            font=self._f_body, text_color="#4CAF50",
         )
         self._lbl_acct_count.pack(side="right")
-        _btn_small_font = ctk.CTkFont(family=_system_font_family(), size=11)
+        _btn_small_font = self._f_small
         self._btn_export = ctk.CTkButton(self._acct_header, text="导出", width=44, height=22,
                                          font=_btn_small_font, fg_color="#607D8B", hover_color="#455A64",
                                          command=self._export_accounts)
@@ -480,15 +500,15 @@ class App(ctk.CTk):
                                             ("monthly", "月度额度")]):
             card = ctk.CTkFrame(quota, corner_radius=10)
             card.grid(row=0, column=col, padx=(0 if col == 0 else 4, 0 if col == 2 else 4), sticky="nsew")
-            ctk.CTkLabel(card, text=title, font=ctk.CTkFont(family=_system_font_family(), size=12),
+            ctk.CTkLabel(card, text=title, font=self._f_body,
                          text_color="#8b949e").pack(anchor="w", padx=12, pady=(10, 0))
             value = ctk.CTkLabel(card, text="—",
-                                 font=ctk.CTkFont(family=_system_font_family(), size=19, weight="bold"))
+                                 font=self._f_card)
             value.pack(anchor="w", padx=12)
             bar = ctk.CTkProgressBar(card, height=8)
             bar.set(0)
             bar.pack(fill="x", padx=12, pady=(6, 2))
-            sub = ctk.CTkLabel(card, text="", font=ctk.CTkFont(family=_system_font_family(), size=11),
+            sub = ctk.CTkLabel(card, text="", font=self._f_small,
                                text_color="#8b949e")
             sub.pack(anchor="w", padx=12, pady=(0, 10))
             self._quota_widgets[key] = {"value": value, "bar": bar, "sub": sub}
@@ -497,22 +517,22 @@ class App(ctk.CTk):
         totals.pack(fill="x", pady=(0, 6))
         self._lbl_usage_totals = ctk.CTkLabel(
             totals, text="用量数据加载中…", justify="left", anchor="w",
-            font=ctk.CTkFont(family=_system_font_family(), size=12),
+            font=self._f_body,
         )
         self._lbl_usage_totals.pack(fill="x", padx=12, pady=10)
 
         head = ctk.CTkFrame(parent, fg_color="transparent")
         head.pack(fill="x", pady=(2, 2))
         ctk.CTkLabel(head, text="各账号用量（本地累计）",
-                     font=ctk.CTkFont(family=_system_font_family(), size=12, weight="bold"),
+                     font=self._f_body_bold,
                      text_color="#aaa").pack(side="left")
         self._btn_usage_refresh = ctk.CTkButton(head, text="刷新", width=52, height=24,
-                                               font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                               font=self._f_small,
                                                fg_color="#607D8B", hover_color="#455A64",
                                                command=lambda: self._refresh_usage(force=True))
         self._btn_usage_refresh.pack(side="right")
         self._lbl_usage_status = ctk.CTkLabel(head, text="",
-                                              font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                              font=self._f_small,
                                               text_color="#8b949e")
         self._lbl_usage_status.pack(side="right", padx=8)
         self._usage_list = ctk.CTkScrollableFrame(parent)
@@ -526,16 +546,16 @@ class App(ctk.CTk):
         head.pack(fill="x", pady=(2, 4))
         self._ent_model = ctk.CTkEntry(
             head, placeholder_text="搜索模型 id / 名称…",
-            font=ctk.CTkFont(family=_system_font_family(), size=12),
+            font=self._f_body,
         )
         self._ent_model.pack(side="left", fill="x", expand=True)
         self._ent_model.bind("<KeyRelease>", lambda _e: self._render_models())
         self._lbl_model_count = ctk.CTkLabel(head, text="—",
-                                             font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                             font=self._f_small,
                                              text_color="#8b949e")
         self._lbl_model_count.pack(side="right", padx=(8, 0))
         ctk.CTkLabel(head, text="点击模型 id 即复制",
-                     font=ctk.CTkFont(family=_system_font_family(), size=11),
+                     font=self._f_small,
                      text_color="#8b949e").pack(side="right", padx=(8, 0))
         self._model_list = ctk.CTkScrollableFrame(parent)
         self._model_list.pack(fill="both", expand=True, pady=(2, 0))
@@ -552,15 +572,15 @@ class App(ctk.CTk):
         except Exception:
             log_path = ""
         ctk.CTkLabel(head, text=f"日志文件：{log_path}",
-                     font=ctk.CTkFont(family=_system_font_family(), size=11),
+                     font=self._f_small,
                      text_color="#8b949e").pack(side="left")
         ctk.CTkButton(head, text="清空显示", width=64, height=24,
-                      font=ctk.CTkFont(family=_system_font_family(), size=11),
+                      font=self._f_small,
                       fg_color="#607D8B", hover_color="#455A64",
                       command=self._clear_log).pack(side="right")
         self._txt_log = ctk.CTkTextbox(
             # 日志含中文：用系统默认字体，避免等宽字体对中文回退造成混排不一致
-            parent, font=ctk.CTkFont(family=_system_font_family(), size=12),
+            parent, font=self._f_body,
             state="disabled", wrap="word",
         )
         self._txt_log.pack(fill="both", expand=True)
@@ -574,18 +594,24 @@ class App(ctk.CTk):
         webbrowser.open(f"http://127.0.0.1:{self.port}/")
 
     def _refresh_usage(self, force: bool = False):
-        """拉取用量/额度（后台线程），渲染后再安排下一次刷新。"""
-        threading.Thread(target=self._refresh_usage_thread, args=(force,), daemon=True).start()
+        """唤醒常驻轮询线程立即刷新用量（可在任意线程调用）。force 时绕过服务端缓存。"""
+        self._usage_force = force
+        self._wake_usage.set()
 
-    def _refresh_usage_thread(self, force: bool):
-        try:
-            url = f"http://127.0.0.1:{self.port}/usage/overview" + ("?refresh=1" if force else "")
-            with urllib.request.urlopen(url, timeout=20) as r:
-                data = json.loads(r.read())
-        except Exception as e:
-            data = {"ok": False, "error": f"本地代理未运行或不可达：{e}"}
-        self._dispatch(self._render_usage, data)
-        self._dispatch(self._refresh_usage, delay=60_000)
+    def _usage_poller(self):
+        """常驻用量轮询：60 秒一次，手动刷新按钮会立即唤醒。"""
+        while True:
+            if self._wake_usage.wait(60.0):
+                self._wake_usage.clear()
+            force = self._usage_force
+            self._usage_force = False
+            try:
+                url = f"http://127.0.0.1:{self.port}/usage/overview" + ("?refresh=1" if force else "")
+                with urllib.request.urlopen(url, timeout=20) as r:
+                    data = json.loads(r.read())
+            except Exception as e:
+                data = {"ok": False, "error": f"本地代理未运行或不可达：{e}"}
+            self._dispatch(self._render_usage, data)
 
     def _render_usage(self, data: dict):
         if not isinstance(data, dict):
@@ -657,7 +683,7 @@ class App(ctk.CTk):
         accounts = local.get("accounts") or []
         if not accounts:
             hint = ctk.CTkLabel(self._usage_list, text="暂无账号",
-                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color="#666")
+                                font=self._f_body, text_color="#666")
             hint.pack(pady=8)
             self._usage_rows.append(hint)
             return
@@ -666,13 +692,13 @@ class App(ctk.CTk):
             row.pack(fill="x", pady=2, padx=2)
             name = acc.get("displayName") or acc.get("userName") or acc.get("id")
             ctk.CTkLabel(row, text=name,
-                         font=ctk.CTkFont(family=_system_font_family(), size=12),
+                         font=self._f_body,
                          text_color="#e6edf3").pack(side="left", padx=(10, 8), pady=5)
             ctk.CTkLabel(row, text=f"↑ {_fmt_tokens(acc.get('tokensIn'))}  ↓ {_fmt_tokens(acc.get('tokensOut'))}",
-                         font=ctk.CTkFont(family=_system_font_family(), size=11),
+                         font=self._f_small,
                          text_color="#8b949e").pack(side="right", padx=(0, 10))
             ctk.CTkLabel(row, text=f"成功 {acc.get('okCount') or 0} · 失败 {acc.get('errCount') or 0}",
-                         font=ctk.CTkFont(family=_system_font_family(), size=11),
+                         font=self._f_small,
                          text_color="#8b949e").pack(side="right", padx=(0, 12))
             self._usage_rows.extend([row])
 
@@ -700,7 +726,7 @@ class App(ctk.CTk):
         self._lbl_model_count.configure(text=f"{len(shown)} / {len(models)} 个")
         if not shown:
             hint = ctk.CTkLabel(self._model_list, text="没有匹配的模型",
-                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color="#666")
+                                font=self._f_body, text_color="#666")
             hint.pack(pady=8)
             self._model_rows.append(hint)
             return
@@ -710,14 +736,14 @@ class App(ctk.CTk):
             ctx = m.get("context_length")
             if isinstance(ctx, int):
                 ctk.CTkLabel(row, text=_fmt_ctx(ctx),
-                             font=ctk.CTkFont(family=_system_font_family(), size=11),
+                             font=self._f_small,
                              text_color="#58a6ff").pack(side="right", padx=(6, 10), pady=4)
             ctk.CTkLabel(row, text=m.get("name") or "",
-                         font=ctk.CTkFont(family=_system_font_family(), size=11),
+                         font=self._f_small,
                          text_color="#8b949e").pack(side="right", padx=(6, 6))
             mid = m["id"]
             lbl_id = ctk.CTkLabel(row, text=mid, cursor="hand2",
-                                  font=ctk.CTkFont(family="Consolas", size=12),
+                                  font=self._f_mono,
                                   text_color="#e6edf3", anchor="w")
             lbl_id.pack(side="left", padx=(10, 6), pady=4)
             # 点击模型 id（或整行）复制到剪贴板
@@ -727,27 +753,28 @@ class App(ctk.CTk):
 
     # ---- 账号池 ----
     def _refresh_accounts(self):
-        """拉取账号池并渲染；在后台线程执行，避免阻塞主线程。"""
-        if self._acct_refreshing:
-            return
-        self._acct_refreshing = True
-        threading.Thread(target=self._refresh_accounts_thread, daemon=True).start()
+        """唤醒常驻轮询线程立即刷新账号池（可在任意线程调用，不会阻塞）。"""
+        self._wake_accounts.set()
 
-    def _refresh_accounts_thread(self):
-        try:
-            base = f"http://127.0.0.1:{self.port}"
-            with urllib.request.urlopen(base + "/account/list", timeout=4) as r:
-                data = json.loads(r.read())
-            self._accounts = data.get("accounts", [])
-        except Exception:
-            # 服务器未就绪/已停止：保留上次快照，避免账号面板每 5 秒闪烁清空。
-            pass
-        finally:
-            self._acct_refreshing = False
-        # 线程安全投递到主循环执行（不可直接调用 self.after/set 控件）。
-        self._dispatch(self._render_accounts)
-        # 定期刷新账号状态
-        self._dispatch(self._refresh_accounts, delay=5_000)
+    def _account_poller(self):
+        """常驻轮询线程：每 5 秒拉一次账号池，登录/增删后由 _refresh_accounts 立即唤醒。
+
+        不从主线程周期性 Thread.start()：主线程在 start() 里等待新线程完成引导，
+        而引导阶段的 GC 可能执行跨线程 Font 析构、又要等主线程的 Tcl —— 曾构成
+        循环死锁（长时间运行后界面与托盘整体冻结、代理却仍在服务）。
+        """
+        while True:
+            if self._wake_accounts.wait(5.0):
+                self._wake_accounts.clear()
+            try:
+                base = f"http://127.0.0.1:{self.port}"
+                with urllib.request.urlopen(base + "/account/list", timeout=4) as r:
+                    data = json.loads(r.read())
+                self._accounts = data.get("accounts", [])
+            except Exception:
+                # 服务器未就绪/已停止：保留上次快照，避免账号面板闪烁清空。
+                pass
+            self._dispatch(self._render_accounts)
 
     def _render_accounts(self):
         for w in self._acct_row_widgets:
@@ -757,7 +784,7 @@ class App(ctk.CTk):
         self._lbl_acct_count.configure(text=f"{count} 个账号")
         if not self._accounts:
             hint = ctk.CTkLabel(self._acct_list, text="暂无账号，点击「OAuth 登录」添加多个账号",
-                                font=ctk.CTkFont(family=_system_font_family(), size=12), text_color="#666")
+                                font=self._f_body, text_color="#666")
             hint.pack(pady=8)
             self._acct_row_widgets.append(hint)
             return
@@ -769,7 +796,7 @@ class App(ctk.CTk):
             color = "#4CAF50" if acc.get("enabled") and not acc.get("cooling") else ("#d29922" if acc.get("cooling") else "#f44336")
             name = acc.get("displayName") or acc.get("userName") or acc.get("keyName") or acc.get("id")
             lbl = ctk.CTkLabel(row, text=f"{status} {name}", cursor="hand2",
-                               font=ctk.CTkFont(family=_system_font_family(), size=12), text_color=color)
+                               font=self._f_body, text_color=color)
             lbl.pack(side="left", padx=(10, 4), pady=6)
             lbl.bind("<Button-1>", lambda _e, i=acc.get("id", ""): self._log_account_details(i))
             # 用量统计（累计）：成功/失败次数 + token 总量
@@ -783,24 +810,24 @@ class App(ctk.CTk):
                 stats.append(f"{tok / 1000:.1f}k tokens" if tok >= 1000 else f"{tok} tokens")
             if stats:
                 lbl_stats = ctk.CTkLabel(row, text=" · ".join(stats),
-                                         font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                         font=self._f_small,
                                          text_color="#666")
                 lbl_stats.pack(side="left", padx=(0, 4), pady=6)
                 self._acct_row_widgets.append(lbl_stats)
             # 小按钮：测试 + 启用/禁用 + 删除
             a_id = acc.get("id", "")
             btn_test = ctk.CTkButton(row, text="测试", width=44, height=24,
-                                     font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                     font=self._f_small,
                                      fg_color="#2196F3", hover_color="#1565C0",
                                      command=lambda i=a_id: self._test_account(i))
             btn_test.pack(side="right", padx=2, pady=4)
             btn_toggle = ctk.CTkButton(row, text="停用" if acc.get("enabled") else "启用", width=52, height=24,
-                                       font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                       font=self._f_small,
                                        fg_color="#607D8B", hover_color="#455A64",
                                        command=lambda i=a_id, e=not acc.get("enabled"): self._toggle_account(i, e))
             btn_toggle.pack(side="right", padx=(2, 4), pady=4)
             btn_del = ctk.CTkButton(row, text="删除", width=44, height=24,
-                                    font=ctk.CTkFont(family=_system_font_family(), size=11),
+                                    font=self._f_small,
                                     fg_color="#f44336", hover_color="#c62828",
                                     command=lambda i=a_id: self._remove_account(i))
             btn_del.pack(side="right", padx=2, pady=4)
