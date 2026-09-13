@@ -564,14 +564,38 @@ class App(ctk.CTk):
                                              font=self._f_small,
                                              text_color="#8b949e")
         self._lbl_model_count.pack(side="right", padx=(8, 0))
-        ctk.CTkLabel(head, text="点击模型 id 即复制",
+        ctk.CTkLabel(head, text="点击行复制模型 id",
                      font=self._f_small,
                      text_color="#8b949e").pack(side="right", padx=(8, 0))
-        self._model_list = ctk.CTkScrollableFrame(parent)
-        self._model_list.pack(fill="both", expand=True, pady=(2, 0))
-        self._model_rows = []
+        # 整份目录渲染进只读文本框（而非逐行控件）：滚动由文本框原生处理，
+        # 消除 ScrollableFrame 里上百个控件滚动时的残影/闪烁，文本也可直接选中复制。
+        self._model_box = ctk.CTkTextbox(
+            parent, font=self._f_mono, wrap="none", state="disabled",
+        )
+        self._model_box.pack(fill="both", expand=True, pady=(2, 0))
+        self._model_ids = []  # 与文本行一一对应的模型 id（点击行复制）
+        self._model_box.bind("<Button-1>", self._on_model_click)
         self._models_sig = None
         self._render_models()
+        # 滚轮兜底：滚轮事件派发给焦点控件，而禁用态的文本框点击时不抢焦点，
+        # 因此切到本页时主动接管焦点，并在应用层兜底把滚轮转发给目录文本框。
+        self._tabs.configure(command=self._on_tab_changed)
+        self.bind("<MouseWheel>", self._on_app_wheel)
+
+    def _on_tab_changed(self):
+        if self._tabs.get() == "模型型号":
+            try:
+                self._model_box.focus_set()
+            except Exception:
+                pass
+
+    def _on_app_wheel(self, event):
+        if self._tabs.get() != "模型型号":
+            return
+        try:
+            self._model_box.yview_scroll(int(-event.delta / 120 * 3), "units")
+        except Exception:
+            pass
 
     # ---- 实时日志标签页 ----
     def _build_logs_tab(self, parent):
@@ -726,40 +750,33 @@ class App(ctk.CTk):
         query = (self._ent_model.get() or "").strip().lower()
         sig = (len(models), models[0]["id"] if models else "", query)
         if sig == self._models_sig:
-            return  # 模型目录与搜索词都没变，跳过重建（避免每 10 秒重建上百个控件）
+            return  # 模型目录与搜索词都没变，跳过重绘
         self._models_sig = sig
         shown = [m for m in models
                  if not query or query in m["id"].lower() or query in (m.get("name") or "").lower()]
-        for w in self._model_rows:
-            w.destroy()
-        self._model_rows = []
         self._lbl_model_count.configure(text=f"{len(shown)} / {len(models)} 个")
-        if not shown:
-            hint = ctk.CTkLabel(self._model_list, text="没有匹配的模型",
-                                font=self._f_body, text_color="#666")
-            hint.pack(pady=8)
-            self._model_rows.append(hint)
-            return
+        self._model_ids = [m["id"] for m in shown]
+        idw = max((len(m["id"]) for m in shown), default=8) + 2
+        namew = max((len(m.get("name") or "") for m in shown), default=8) + 2
+        lines = []
         for m in shown:
-            row = ctk.CTkFrame(self._model_list, fg_color="#1f262f", corner_radius=6)
-            row.pack(fill="x", pady=1, padx=2)
             ctx = m.get("context_length")
-            if isinstance(ctx, int):
-                ctk.CTkLabel(row, text=_fmt_ctx(ctx),
-                             font=self._f_small,
-                             text_color="#58a6ff").pack(side="right", padx=(6, 10), pady=4)
-            ctk.CTkLabel(row, text=m.get("name") or "",
-                         font=self._f_small,
-                         text_color="#8b949e").pack(side="right", padx=(6, 6))
-            mid = m["id"]
-            lbl_id = ctk.CTkLabel(row, text=mid, cursor="hand2",
-                                  font=self._f_mono,
-                                  text_color="#e6edf3", anchor="w")
-            lbl_id.pack(side="left", padx=(10, 6), pady=4)
-            # 点击模型 id（或整行）复制到剪贴板
-            lbl_id.bind("<Button-1>", lambda _e, i=mid: self._copy_model_id(i))
-            row.bind("<Button-1>", lambda _e, i=mid: self._copy_model_id(i))
-            self._model_rows.append(row)
+            ctx_s = _fmt_ctx(ctx) if isinstance(ctx, int) else "—"
+            lines.append(f"  {m['id']:<{idw}}{(m.get('name') or ''):<{namew}}{ctx_s:>6}")
+        self._model_box.configure(state="normal")
+        self._model_box.delete("1.0", "end")
+        self._model_box.insert("end", "\n".join(lines) if shown else "没有匹配的模型")
+        self._model_box.configure(state="disabled")
+
+    def _on_model_click(self, event):
+        """点击目录中的某一行：复制该行对应的模型 id。"""
+        try:
+            idx = self._model_box.index(f"@{event.x},{event.y}")
+            line_no = int(str(idx).split(".")[0])
+        except Exception:
+            return
+        if 1 <= line_no <= len(self._model_ids):
+            self._copy_model_id(self._model_ids[line_no - 1])
 
     # ---- 账号池 ----
     def _refresh_accounts(self):
