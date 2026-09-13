@@ -40,8 +40,22 @@ This is an independent Python implementation focused on local OpenAI-compatible 
 - Conversion for reasoning content, tool calls, finish reasons, and usage metadata.
 - Local health check, login, logout, and CORS endpoints.
 - Multi-account pool (round-robin scheduling + exponential backoff + failover) to spread quota across several OAuth accounts.
+- Resilience: upstream read idle timeouts (streaming 120s / non-streaming 300s by default), empty responses and pre-output errors are retried or failed over before any byte reaches the client, and gateway `402` is treated like rate limiting (failover to the next account).
+- The CLI fingerprint version auto-follows the latest CommandCode CLI via the npm registry (24h refresh); set `CC_VERSION` to pin it.
+- Optional zero-data-retention routing (`x-cmd-zdr: 1`) via `CC_ZDR` or the desktop-UI toggle.
 - Windows start, stop, login, auto-start, and PyInstaller build scripts.
 - Local mock tests and GitHub Actions validation.
+
+### Configuration (environment variables)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CC_VERSION` | auto (npm latest, 24h refresh) | CLI fingerprint version sent to the gateway; setting it pins the value and disables auto-follow. |
+| `CC_ZDR` | unset | `1`/`true` enables zero-data-retention routing (`x-cmd-zdr: 1` on generation requests). |
+| `CC_STREAM_IDLE_S` | `120` | Streaming read idle timeout in seconds (per read, not per request). |
+| `CC_NONSTREAM_IDLE_S` | `300` | Non-streaming read idle timeout in seconds. |
+
+`--cc-version` and `--zdr` CLI flags mirror the first two. The official CLI itself has no idle timeout and long reasoning pauses are normal, so the defaults are deliberately generous; raise them if a model is being cut off mid-thought.
 
 ### Important limitations
 
@@ -268,9 +282,23 @@ Command Code Go 主要面向 Command Code CLI，并且不提供静态 Provider A
 - 支持推理内容、工具调用、结束原因和 usage 信息转换。
 - 提供健康检查、登录、登出和 CORS 接口。
 - 提供多账号池（轮询调度 + 指数退避 + 失败转接），多个 OAuth 账号摊薄额度。
+- 韧性增强：上游读空闲超时（流式 120s / 非流式 300s，可配），空回复与输出前的错误在向客户端发送任何字节前即重试或换号，网关 402（余额耗尽）按限流处理（换下一个账号）。
+- CLI 指纹版本每 24h 自动跟随 npm 上的最新 CommandCode CLI；设置 `CC_VERSION` 后固定不再刷新。
+- 可选零数据保留路由（`x-cmd-zdr: 1`），通过 `CC_ZDR` 或桌面界面开关。
 - 提供 Windows 启动、停止、登录、开机自启和 PyInstaller 打包脚本。
 - 提供流式、非流式、工具调用、usage 和缓存鉴权的 Mock 测试。
 - 提供 GitHub Actions 自动测试。
+
+### 配置（环境变量）
+
+| 变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `CC_VERSION` | 自动跟随 npm 最新版（24h 刷新） | 发给网关的 CLI 指纹版本；显式设置后固定并停用自动跟随。 |
+| `CC_ZDR` | 未设置 | `1`/`true` 开启零数据保留（对 generate 请求附带 `x-cmd-zdr: 1`）。 |
+| `CC_STREAM_IDLE_S` | `120` | 流式读空闲超时（秒，按单次 read 计，不是请求总时长）。 |
+| `CC_NONSTREAM_IDLE_S` | `300` | 非流式读空闲超时（秒）。 |
+
+`--cc-version` 与 `--zdr` 命令行参数与上表前两项等效。官方 CLI 对上游没有任何空闲超时，推理模型的合法停顿可以很长，因此默认值刻意取宽；若遇到模型「思考中途被掐断」，调大即可。
 
 ### 重要限制和风险
 

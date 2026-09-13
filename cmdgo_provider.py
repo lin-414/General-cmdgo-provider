@@ -31,8 +31,11 @@ HTTP 接口（与 OpenAI 兼容，可直接填进 Hermes Studio 的「自定义 
   COMMANDCODE_BASE_URL  网关基址（默认 https://api.commandcode.ai）
   COMMANDCODE_API_KEY   若设置，则覆盖 OAuth 缓存的 key（仍可用，但不是 Go 的常规方式）
   API_KEY               同上（兼容别名）
-  CC_VERSION            伪装 CLI 版本（默认 1.31.0）
+  CC_VERSION            伪装 CLI 版本；默认自动跟随 npm 最新版（24h 刷新），设置后固定
   CC_PROJECT_SLUG       x-project-slug（默认 dsh-cmdgo）
+  CC_ZDR                1/true 开启零数据保留（对 generate 附带 x-cmd-zdr: 1）
+  CC_STREAM_IDLE_S      流式读空闲超时秒数（默认 120，只计单次 read 无数据）
+  CC_NONSTREAM_IDLE_S   非流式读空闲超时秒数（默认 300）
   LOGIN_STUDIO_BASE     OAuth studio 来源（默认 https://commandcode.ai）
 """
 
@@ -45,6 +48,7 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
 import socket
 import sys
@@ -61,15 +65,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("PORT", "8787"))
 BASE_URL = (os.environ.get("COMMANDCODE_BASE_URL", "https://api.commandcode.ai")).rstrip("/")
 # 应用版本：发版时与 pyproject.toml 的 version 一同更新（GUI 用它检查新版本）。
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_LATEST_URL = "https://api.github.com/repos/lin-414/General-cmdgo-provider/releases/latest"
-CC_VERSION = os.environ.get("CC_VERSION", "1.31.0")
+# CLI 指纹版本：默认每 24h 从 npm registry 自动跟随最新 CLI（上游开始拒绝过旧版本，
+# 回 403 upgrade_required）。显式设置 CC_VERSION / --cc-version 后固定为该值、不再刷新。
+_CC_VERSION_FALLBACK = "1.31.0"
+CC_VERSION = os.environ.get("CC_VERSION", _CC_VERSION_FALLBACK)
+CC_VERSION_AUTO = "CC_VERSION" not in os.environ
+NPM_CC_VERSION_URL = "https://registry.npmjs.org/command-code/latest"
+CC_VERSION_REFRESH_S = 24 * 60 * 60
 PROJECT_SLUG = os.environ.get("CC_PROJECT_SLUG", "dsh-cmdgo")
 STUDIO_BASE = (os.environ.get("LOGIN_STUDIO_BASE", "https://commandcode.ai")).rstrip("/")
 OVERRIDE_KEY = os.environ.get("COMMANDCODE_API_KEY") or os.environ.get("API_KEY", "")
 DEFAULT_MAX_TOKENS = 64000
-MODELS_URL = "https://api.commandcode.ai/provider/v1/models"
+MODELS_PATH = "/provider/v1/models"
 MODELS_REFRESH_S = 15 * 60
+# 零数据保留：开启后对 /alpha/generate 附带 x-cmd-zdr: 1（官方 CLI 的隐私路由开关）。
+ZDR_ENABLED = os.environ.get("CC_ZDR", "").strip().lower() in ("1", "true", "yes", "on")
+# 上游读空闲超时（秒）：只计「单次 read 无数据」的等待，不是请求总时长。
+# 官方 CLI 对上游没有任何空闲超时，推理模型的合法停顿可达数百秒（参考 MAXeaglet/
+# commandcode-proxy issue #19 的实测），因此默认值取宽：流式 120s / 非流式 300s。
+STREAM_IDLE_TIMEOUT_S = float(os.environ.get("CC_STREAM_IDLE_S", "120"))
+NONSTREAM_IDLE_TIMEOUT_S = float(os.environ.get("CC_NONSTREAM_IDLE_S", "300"))
 
 logging.basicConfig(level=logging.INFO, format="[cmdgo-provider %(asctime)s] %(message)s")
 log = logging.getLogger("cmdgo-provider").info
@@ -163,8 +180,8 @@ def build_session_id() -> str:
     return SESSION_ID
 
 
-def fingerprint_headers(api_key: str) -> dict:
-    return {
+def fingerprint_headers(api_key: str, zdr: bool = False) -> dict:
+    h = {
         "content-type": "application/json",
         "user-agent": f"commandcode/{CC_VERSION}",
         "x-command-code-version": CC_VERSION,
@@ -174,6 +191,9 @@ def fingerprint_headers(api_key: str) -> dict:
         "x-project-slug": PROJECT_SLUG,
         "authorization": f"Bearer {api_key}",
     }
+    if zdr:
+        h["x-cmd-zdr"] = "1"
+    return h
 
 
 def gateway_error_message(body: str):
@@ -442,6 +462,17 @@ def build_nonstream(model: str, events: list, created: int) -> dict:
     }
 
 
+def payload_visible(p) -> bool:
+    """OpenAI 流 payload 是否含客户端可见输出（文本/推理/工具调用）。"""
+    if not isinstance(p, dict):
+        return False
+    for ch in p.get("choices", []) or []:
+        d = ch.get("delta") or {}
+        if d.get("content") or d.get("reasoning_content") or d.get("tool_calls"):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 模型目录刷新
 # ---------------------------------------------------------------------------
@@ -452,7 +483,7 @@ def refresh_models() -> None:
         # with HTTP 403 even though this public catalog is unauthenticated.
         # Use the same CLI fingerprint as gateway requests, but do not attach
         # the Go OAuth token: this is the public Provider catalog endpoint.
-        req = urllib.request.Request(MODELS_URL, headers={
+        req = urllib.request.Request(BASE_URL + MODELS_PATH, headers={
             "accept": "application/json",
             "user-agent": f"commandcode/{CC_VERSION}",
             "x-command-code-version": CC_VERSION,
@@ -482,6 +513,42 @@ def model_refresh_loop() -> None:
     while True:
         refresh_models()
         time.sleep(MODELS_REFRESH_S)
+
+
+# ---------------------------------------------------------------------------
+# CLI 指纹版本自动跟随（npm registry，24h 一轮；显式设置 CC_VERSION 时停用）
+# ---------------------------------------------------------------------------
+_VERSION_RE = re.compile(r"^\d+\.\d+(\.\d+)?")
+
+
+def refresh_cc_version() -> bool:
+    """从 npm registry 拉取最新 CLI 版本号；失败时沿用当前值。
+
+    上游会拒绝过旧的 CLI 版本（403 upgrade_required），硬编码版本号迟早过期。
+    """
+    global CC_VERSION
+    try:
+        req = urllib.request.Request(NPM_CC_VERSION_URL, headers={
+            "accept": "application/json",
+            "user-agent": f"cmdgo-provider/{APP_VERSION}",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            v = (json.loads(r.read().decode("utf-8", "replace")) or {}).get("version")
+        if not isinstance(v, str) or not _VERSION_RE.match(v):
+            raise ValueError(f"unexpected npm payload: {v!r}")
+        if v != CC_VERSION:
+            log("CLI 指纹版本更新：%s -> %s（npm registry）", CC_VERSION, v)
+            CC_VERSION = v
+        return True
+    except Exception as e:
+        log("npm 版本检查失败，沿用 CLI 指纹 %s: %s", CC_VERSION, e)
+        return False
+
+
+def cc_version_refresh_loop() -> None:
+    while True:
+        refresh_cc_version()
+        time.sleep(CC_VERSION_REFRESH_S)
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +859,10 @@ def handle_models(handler) -> None:
         row = {"id": m["id"], "object": "model", "created": 0,
                "owned_by": "commandcode-go", "name": m["name"]}
         if isinstance(m.get("context_length"), int):
+            # 同一元数据以多个常见字段名暴露（不同客户端读取的字段不同）。
             row["context_length"] = m["context_length"]
+            row["context_window"] = m["context_length"]
+            row["max_context_length"] = m["context_length"]
         data.append(row)
     send_json(handler, 200, {"object": "list", "data": data})
 
@@ -846,18 +916,21 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
       ok         成功响应已完整发给客户端
       stream_err 流式响应已开始后出错（已向客户端发送错误，不可换号重试）
       error      尚未向客户端发送任何字节；failure=(status, message, err_type, retryable)
+                 （流式在首个可见输出前不发字节，空回复/前置错误/空闲超时都归为此类，可换号重试）
     """
     envelope = openai_to_cc_envelope(body)
-    headers = fingerprint_headers(api_key)
+    headers = fingerprint_headers(api_key, zdr=ZDR_ENABLED)
     model = body.get("model")
     want_stream = body.get("stream") is True
     include_usage = want_stream and isinstance(body.get("stream_options"), dict) and body["stream_options"].get("include_usage") is True
+    # 空闲超时：只约束单次 read 的无数据等待；流式/非流式分开配置。
+    idle_timeout = STREAM_IDLE_TIMEOUT_S if want_stream else NONSTREAM_IDLE_TIMEOUT_S
     log("chat: attempt model=%s account=%s stream=%s", model, account.id if account else "-", want_stream)
 
     data = json.dumps(envelope).encode("utf-8")
     conn = None
     try:
-        conn, upstream = _open_stream(BASE_URL + "/alpha/generate", data, headers)
+        conn, upstream = _open_stream(BASE_URL + "/alpha/generate", data, headers, timeout=idle_timeout)
         log("chat: upstream status=%s", upstream.status)
     except Exception as e:
         log("chat: connect threw: %s", e)
@@ -874,52 +947,88 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
                 return "error", (400, msg, "invalid_request_error", False)
             # 网关开始强制要求更新的 CLI 版本：换账号没有用，直接给出明确的处理指引。
             if gateway_error_code(raw) == "upgrade_required":
-                log("上游要求更新 CLI 版本（upgrade_required）：当前伪装版本 %s，"
-                    "请设置环境变量 CC_VERSION 或 --cc-version 为更新的 CLI 版本后重启", CC_VERSION)
+                log("上游要求更新 CLI 版本（upgrade_required）：CC_VERSION 默认每 24h 自动跟随 npm 最新版；"
+                    "若仍触发，请用环境变量 CC_VERSION 或 --cc-version 显式指定（当前 %s）", CC_VERSION)
                 return "error", (502, f"Command Code gateway requires a newer CLI version (upgrade_required). "
-                                      f"Set the CC_VERSION env var (or --cc-version) to a newer CLI release and restart. "
+                                      f"CC_VERSION normally auto-follows the npm latest release every 24h; "
+                                      f"if this persists, set the CC_VERSION env var (or --cc-version) explicitly. "
                                       f"Current: {CC_VERSION}", "server_error", False)
             if upstream.status in (401, 403):
                 st, et, retry = 401, "authentication_error", True
-            elif upstream.status == 429:
+            elif upstream.status in (402, 429):
+                # 402 = 余额耗尽：与限流同义，换号重试。
                 st, et, retry = 429, "rate_limit_exceeded", True
             elif upstream.status >= 500:
                 st, et, retry = 502, "server_error", True
             else:
                 st, et, retry = 400, "invalid_request_error", False
             # 仅对鉴权/限流错误记账，便于冷却与转接；其他 4xx 不惩罚。
-            if account is not None and upstream.status in (401, 403, 429):
+            if account is not None and upstream.status in (401, 402, 403, 429):
                 pool.report_failure(account, f"upstream {upstream.status}: {msg}")
             return "error", (st, msg, et, retry)
 
         if not want_stream:
             try:
                 events = list(iter_ndjson_lines(upstream))
+            except (TimeoutError, socket.timeout):
+                # 读空闲超时发生在任何字节发给客户端之前：可重试/可换号。
+                return "error", (429, f"Command Code upstream idle timeout (no data for {int(idle_timeout)}s)",
+                                 "rate_limit_exceeded", True)
+            except OSError as e:  # 连接在读完前断开
+                return "error", (502, f"upstream connection error: {e}", "server_error", True)
+            try:
                 resp = build_nonstream(model, events, created)
             except ValueError as e:  # 网关在 200 流里回了 error 事件
                 if account is not None:
                     pool.report_failure(account, f"upstream error event: {e}")
                 return "error", (502, str(e), "api_error", True)
+            msg0 = resp["choices"][0]["message"]
+            if msg0.get("content") is None and "reasoning_content" not in msg0 and "tool_calls" not in msg0:
+                # 空回复（零可见输出）：上游偶发抖动，按 429 让客户端重试/换号，不计账号故障。
+                return "error", (429, "Command Code upstream returned an empty response (zero visible output)",
+                                 "rate_limit_exceeded", True)
             send_json(handler, 200, resp)
             if account is not None:
                 u = resp.get("usage")
                 pool.report_success(account, usage=u if isinstance(u, dict) else None)
             return "ok", None
 
-        # streaming
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "close")
-        handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.end_headers()
-        handler.wfile.flush()
-        sse(handler, {"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+        # streaming —— 在收到第一个「可见输出」前不向客户端发送任何字节：
+        # 空回复、前置错误事件、连接空闲超时都还能按可重试失败处理（换号或让客户端重试）；
+        # 一旦开始输出就只能透传到底。
         state = {"toolIdx": 0, "wantUsage": include_usage}
+        pending: list = []
+        visible = False
         try:
             for ev in iter_ndjson_lines(upstream):
                 for p in event_to_openai(ev, state):
-                    sse(handler, p)
+                    if isinstance(p, dict) and "error" in p and not visible:
+                        # 输出开始前的流内错误：等价于一次失败响应，交给 failover。
+                        if account is not None:
+                            pool.report_failure(account, f"upstream error event: {p['error'].get('message', '')}")
+                        return "error", (502, p["error"].get("message") or "unknown Command Code stream error",
+                                         "api_error", True)
+                    if not visible and payload_visible(p):
+                        visible = True
+                        handler.send_response(200)
+                        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                        handler.send_header("Cache-Control", "no-cache")
+                        handler.send_header("Connection", "close")
+                        handler.send_header("Access-Control-Allow-Origin", "*")
+                        handler.end_headers()
+                        handler.wfile.flush()
+                        sse(handler, {"choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+                        for q in pending:
+                            sse(handler, q)
+                        pending = []
+                    if visible:
+                        sse(handler, p)
+                    else:
+                        pending.append(p)
+            if not visible:
+                # 空回复（零可见输出）：上游偶发抖动，按 429 让客户端重试/换号，不计账号故障。
+                return "error", (429, "Command Code upstream returned an empty response (zero visible output)",
+                                 "rate_limit_exceeded", True)
             if account is not None:
                 if state.get("sawError"):
                     pool.report_failure(account, f"upstream error event: {state.get('errorMessage', '')}")
@@ -932,6 +1041,17 @@ def _attempt_chat(handler, body: dict, api_key: str, account, created: int):
             # 客户端主动断开（ZCode 停止/超时）不是账号的问题：不记账，也不再写响应。
             log("chat: client disconnected mid-stream")
             return "stream_err", None
+        except (TimeoutError, socket.timeout):
+            if not visible:
+                return "error", (429, f"Command Code upstream idle timeout (no data for {int(idle_timeout)}s)",
+                                 "rate_limit_exceeded", True)
+            try:
+                sse(handler, {"error": {"message": f"upstream idle timeout (no data for {int(idle_timeout)}s)",
+                                        "type": "api_error"}})
+            except Exception:
+                pass
+            if account is not None:
+                pool.report_failure(account, "stream: upstream idle timeout")
         except Exception as e:
             try:
                 sse(handler, {"error": {"message": f"stream error: {e}", "type": "api_error"}})
@@ -961,12 +1081,12 @@ def test_account(account) -> dict:
     model = next((m["id"] for m in model_cache["models"]), None) or "Qwen/Qwen3.7-Flash"
     envelope = openai_to_cc_envelope({"model": model, "messages": [{"role": "user", "content": "ping"}],
                                       "max_tokens": 16})
-    headers = fingerprint_headers(account.apiKey)
+    headers = fingerprint_headers(account.apiKey, zdr=ZDR_ENABLED)
     data = json.dumps(envelope).encode("utf-8")
     t0 = time.time()
     conn = None
     try:
-        conn, upstream = _open_stream(BASE_URL + "/alpha/generate", data, headers)
+        conn, upstream = _open_stream(BASE_URL + "/alpha/generate", data, headers, timeout=60)
     except Exception as e:
         return {"ok": False, "status": 0, "latencyMs": int((time.time() - t0) * 1000), "message": f"连接失败: {e}"}
     try:
@@ -1013,8 +1133,12 @@ def handle_chat(handler, body: dict) -> None:
     send_json(handler, status, {"error": {"message": msg, "type": etype}})
 
 
-def _open_stream(url: str, data: bytes, headers: dict):
-    """用 http.client 直接打开上游（支持 chunked NDJSON 的增量 readline）。"""
+def _open_stream(url: str, data: bytes, headers: dict, timeout: float = 600.0):
+    """用 http.client 直接打开上游（支持 chunked NDJSON 的增量 readline）。
+
+    timeout 作用于 socket 的每个阻塞操作（连接、发送、单次 read）——即「空闲超时」，
+    不是整个请求的总时长；每收到一段数据计时重置。
+    """
     parsed = urllib.parse.urlparse(url)
     is_https = parsed.scheme == "https"
     host = parsed.hostname
@@ -1024,9 +1148,9 @@ def _open_stream(url: str, data: bytes, headers: dict):
         path += "?" + parsed.query
     h = {k: ("" if v is None else str(v)) for k, v in headers.items()}
     if is_https:
-        conn = http.client.HTTPSConnection(host, port, timeout=600)
+        conn = http.client.HTTPSConnection(host, port, timeout=timeout)
     else:
-        conn = http.client.HTTPConnection(host, port, timeout=600)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
     conn.request("POST", path, body=data, headers=h)
     return conn, conn.getresponse()
 
@@ -1288,6 +1412,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             send_json(self, 200, {"ok": True, "service": "cmdgo-hermes-provider",
                                   "models": len(model_cache["models"]), "baseUrl": BASE_URL,
                                   "accounts": pool.size, "ccVersion": CC_VERSION,
+                                  "ccVersionAuto": CC_VERSION_AUTO, "zdr": ZDR_ENABLED,
                                   "appVersion": APP_VERSION})
             return
         if p == "/account/list":
@@ -1407,10 +1532,13 @@ def start_server(block: bool = False):
         return _server
     _server = make_server()
     threading.Thread(target=model_refresh_loop, daemon=True).start()
+    if CC_VERSION_AUTO:
+        threading.Thread(target=cc_version_refresh_loop, daemon=True).start()
     # poll_interval 越短，shutdown() 的等待窗口越短（默认 0.5s），
     # GUI 的「停止→立刻重启」就不容易撞上端口释放竞态。
     if block:
-        log("listening on http://localhost:%s  (COMMANDCODE_BASE_URL=%s, CLI %s)", PORT, BASE_URL, CC_VERSION)
+        log("listening on http://localhost:%s  (COMMANDCODE_BASE_URL=%s, CLI %s%s)",
+            PORT, BASE_URL, CC_VERSION, "，版本自动跟随 npm" if CC_VERSION_AUTO else "")
         if OVERRIDE_KEY:
             log("COMMANDCODE_API_KEY env set: incoming Authorization headers are ignored.")
         _server.serve_forever(poll_interval=0.05)
@@ -1484,12 +1612,14 @@ def _run_login_flow(port: int) -> int:
 
 
 def main():
-    global PORT, BASE_URL, OVERRIDE_KEY, CC_VERSION
+    global PORT, BASE_URL, OVERRIDE_KEY, CC_VERSION, CC_VERSION_AUTO, ZDR_ENABLED
     ap = argparse.ArgumentParser(description="CommandCode Go -> OpenAI 兼容代理 (纯 Python)")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--base-url", default=BASE_URL)
     ap.add_argument("--api-key", default=OVERRIDE_KEY)
-    ap.add_argument("--cc-version", default=CC_VERSION)
+    ap.add_argument("--cc-version", default=None,
+                    help="固定 CLI 指纹版本；缺省时每 24h 自动跟随 npm 最新版")
+    ap.add_argument("--zdr", action="store_true", help="开启零数据保留（x-cmd-zdr: 1）")
     ap.add_argument("--login", action="store_true", help="启动代理并完成 OAuth 登录后退出")
     ap.add_argument("--keep-alive", action="store_true", help="与 --login 搭配：登录成功后保持代理运行")
     ap.add_argument("--no-gui", action="store_true", help="(兼容参数，忽略) 控制台模式；桌面入口是 cmdgo_gui.py")
@@ -1498,7 +1628,11 @@ def main():
     BASE_URL = args.base_url.rstrip("/")
     if args.api_key:
         OVERRIDE_KEY = args.api_key
-    CC_VERSION = args.cc_version
+    if args.cc_version:
+        CC_VERSION = args.cc_version
+        CC_VERSION_AUTO = False
+    if args.zdr:
+        ZDR_ENABLED = True
 
     if args.login:
         rc = _run_login_flow(args.port)

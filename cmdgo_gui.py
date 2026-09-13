@@ -401,6 +401,16 @@ class App(ctk.CTk):
         else:
             self._chk_autostart.configure(state="disabled")
 
+        # 零数据保留（x-cmd-zdr）：运行时开关，立即生效、无需重启代理
+        self._chk_zdr = ctk.CTkCheckBox(
+            self._frame_status, text="零数据保留", width=92,
+            font=self._f_body,
+            command=self._toggle_zdr,
+        )
+        self._chk_zdr.pack(side="right", padx=(0, 12))
+        if proxy.ZDR_ENABLED:
+            self._chk_zdr.select()
+
         # 标签页：概览 / 账号 / 用量与额度 / 模型型号 / 实时日志
         self._tabs = ctk.CTkTabview(self)
         self._tabs.pack(fill="both", expand=True, padx=10, pady=(2, 10))
@@ -1068,9 +1078,10 @@ class App(ctk.CTk):
                 current = a.display_name
                 break
         login = "OAuth 缓存：已登录" if proxy.cached_api_key else "OAuth 缓存：未登录（使用账号池）"
+        zdr = "ZDR：开" if proxy.ZDR_ENABLED else "ZDR：关"
         return (f"运行时长：{self._uptime_text()}        程序版本：v{proxy.APP_VERSION}        "
-                f"CLI 指纹：commandcode/{proxy.CC_VERSION}\n"
-                f"当前账号：{current}        账号池：{proxy.pool.active_count()} 可用 / {proxy.pool.size} 总        {login}")
+                f"CLI 指纹：commandcode/{proxy.CC_VERSION}{'（自动跟随 npm）' if proxy.CC_VERSION_AUTO else ''}\n"
+                f"当前账号：{current}        账号池：{proxy.pool.active_count()} 可用 / {proxy.pool.size} 总        {login}        {zdr}")
 
     # ---- 开机自启 ----
     def _toggle_autostart(self):
@@ -1083,6 +1094,12 @@ class App(ctk.CTk):
             self._chk_autostart.deselect()
         else:
             self._chk_autostart.select()
+
+    # ---- 零数据保留（x-cmd-zdr）----
+    def _toggle_zdr(self):
+        proxy.ZDR_ENABLED = bool(self._chk_zdr.get())
+        proxy.log("零数据保留（x-cmd-zdr）已%s，对后续请求立即生效",
+                  "开启" if proxy.ZDR_ENABLED else "关闭")
 
     # ---- 新版本检查 ----
     def _check_update_thread(self):
